@@ -584,6 +584,20 @@ impl Evaluator {
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
+            (Value::Object(map, _), name @ ("every" | "any")) => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval(format!("{name} requires a function")))?;
+                let wanted = name == "any";
+                for (k, v) in map.iter() {
+                    let key = self.entry_key_value(k);
+                    let result = self.invoke_lambda(lambda, &[key, v.clone()], depth)?;
+                    if is_truthy(&result) == wanted {
+                        return Ok(Some(Value::Bool(wanted)));
+                    }
+                }
+                Ok(Some(Value::Bool(!wanted)))
+            }
             (Value::Object(map, _), "filter") => {
                 let lambda = args
                     .first()

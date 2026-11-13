@@ -1537,7 +1537,9 @@ impl Evaluator {
                         Err(_) => complete = false,
                     }
                 }
-                Entry::TypeAlias(name, ty) => self.eval_type_alias(name, ty, &mut default_scope),
+                Entry::TypeAlias(name, ty, generic) => {
+                    self.eval_type_alias(name, ty, generic.as_ref(), &mut default_scope)
+                }
                 _ => {}
             }
         }

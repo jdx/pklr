@@ -294,10 +294,17 @@ impl Evaluator {
         &self,
         name: &str,
         ty: &crate::parser::TypeExpr,
+        generic: Option<&crate::parser::GenericAlias>,
         scope: &mut Scope,
     ) {
         // Store the TypeExpr so `is`/`as` can resolve alias names to their definitions
         scope.set_type_alias(name.to_string(), ty.clone());
+        if let Some(generic) = generic {
+            scope.set_type_alias(
+                generic_alias_key(name),
+                crate::parser::TypeExpr::Generic(generic.0.join(","), vec![generic.1.clone()]),
+            );
+        }
         // Also mark the name as a type among the bindings, which a function
         // captures (its alias map is not), so `new Alias {}` inside one is
         // still known to name a type.

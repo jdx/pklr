@@ -1400,7 +1400,7 @@ fn element_and_signature_types_match_pkl() {
 fn a_dynamic_is_not_accepted_for_a_listing_parameter() {
     let error = eval_fails("function f(x: Listing<Int>): Int = 1\ny = f(new Dynamic { 1 })\n");
     assert!(
-        error.contains("Expected value of type `Listing<Int>`, but got type `Dynamic`"),
+        error.contains("Expected value of type `Listing`, but got type `Dynamic`"),
         "{error}"
     );
 }
@@ -1409,7 +1409,7 @@ fn a_dynamic_is_not_accepted_for_a_listing_parameter() {
 fn a_wrong_element_is_named_in_the_error() {
     let error = eval_fails("a: Listing<Int> = new Listing { 1; \"x\" }\n");
     assert!(
-        error.contains("Expected value of type `Listing<Int>`"),
+        error.contains("Expected value of type `Int`, but got type `String`"),
         "{error}"
     );
     let error = eval_fails("function f(x: Int): Int = x\ny = f(\"x\")\n");
@@ -1425,7 +1425,7 @@ fn a_wrong_element_is_named_in_the_error() {
 fn elements_are_checked_when_the_value_is() {
     let error =
         eval_fails("function f(x: Listing<Int>): Int = x.length\ny = f(new Listing { \"a\" })\n");
-    assert!(error.contains("Listing<Int>"), "{error}");
+    assert!(error.contains("type `Int`"), "{error}");
 }
 
 // An untyped `new { ... }` element of a class-typed `Listing` is an instance
@@ -1764,5 +1764,59 @@ fn json_renderer_omits_null_entries_with_compound_keys() {
     assert_eq!(
         pklr::eval_to_json(&file).unwrap(),
         serde_json::json!({"r": "{}"})
+    );
+}
+
+#[test]
+fn constrained_dynamic_default_is_checked() {
+    let msg = eval_fails("foo: Dynamic(this == new Dynamic { ...List(1) })");
+    assert!(msg.contains("Type constraint `this == new Dynamic { ...List(1) }` violated."));
+}
+
+#[test]
+fn map_every_and_any_take_key_and_value() {
+    let json = eval(
+        r#"
+m = Map("a", 1, "b", 2)
+all = m.every((k, v) -> v > 0)
+some = m.any((k, v) -> k == "b")
+none = m.any((k, v) -> v > 5)
+"#,
+    );
+    assert_eq!(json["all"], true);
+    assert_eq!(json["some"], true);
+    assert_eq!(json["none"], false);
+}
+
+#[test]
+fn generic_alias_constraint_binds_its_arguments() {
+    let json = eval(
+        r#"
+typealias Same<T> = List(this[0] is T)
+ok = List(1) is Same<Int>
+bad = List("x") is Same<Int>
+"#,
+    );
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["bad"], false);
+    let msg = eval_fails(
+        r#"
+typealias Same<T> = List(this[0] is T)
+local xs = List("x")
+res = (() -> xs as Same<Int>).apply()
+"#,
+    );
+    assert!(
+        msg.contains("Type constraint `this[0] is T` violated."),
+        "{msg}"
+    );
+}
+
+#[test]
+fn null_for_a_class_type_reports_null() {
+    let msg = eval_fails("x: String = null");
+    assert!(
+        msg.contains("Expected value of type `String`, but got `null`."),
+        "{msg}"
     );
 }

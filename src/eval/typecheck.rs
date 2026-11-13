@@ -573,32 +573,97 @@ impl Evaluator {
     }
 
     /// The error for `val` failing `ty`. Like a declared property, a
-    /// `List<T>` or `Set<T>` argument is faulted on its first element that is
-    /// not a `T`, not on the collection.
+    /// collection argument is faulted on its first element that is not
+    /// of the element type, not on the collection.
     pub(super) fn mismatch_naming_element(
         &mut self,
         ty: &crate::parser::TypeExpr,
         val: &Value,
         scope: &Scope,
-        depth: usize,
+        _depth: usize,
     ) -> String {
-        if let (crate::parser::TypeExpr::Generic(name, args), Value::List(items)) = (ty, val)
-            && let [element] = args.as_slice()
-            && matches!(
-                (name.as_str(), items.kind()),
-                ("List", ListKind::List) | ("Set", ListKind::Set)
-            )
-        {
-            for item in items.iter() {
-                self.type_violation = None;
-                if let Ok(false) =
-                    self.eval_argument_check(item, element, scope, depth, &mut Vec::new())
-                {
-                    return self.mismatch_naming_element(element, item, scope, depth);
+        self.type_mismatch_message(ty, val, None, scope)
+    }
+
+    /// The error for the first element, key, value or pair member of `val`
+    /// that is not of the type argument of `ty`, when `val` is the right
+    /// kind of collection to begin with.
+    fn element_mismatch(
+        &mut self,
+        ty: &crate::parser::TypeExpr,
+        val: &Value,
+        scope: &Scope,
+    ) -> Option<String> {
+        use crate::parser::TypeExpr;
+        let (name, args) = match ty {
+            TypeExpr::Nullable(inner) if !is_null_value(val) => {
+                return self.element_mismatch(inner, val, scope);
+            }
+            TypeExpr::Generic(name, args) => (name.trim_start_matches('*'), args),
+            _ => return None,
+        };
+        if !value_is_type(val, ty) {
+            return None;
+        }
+        // A type parameter or `Any` accepts everything.
+        let modeled = |ty: Option<&TypeExpr>| {
+            ty.filter(|ty| !type_is_any(ty) && type_is_runtime_checkable(ty, scope))
+                .cloned()
+        };
+        let mut pairs: Vec<(Value, TypeExpr)> = Vec::new();
+        match (name, val) {
+            ("List" | "Listing" | "Set" | "Collection", Value::List(items)) => {
+                if let Some(element) = modeled(args.first()) {
+                    pairs.extend(items.iter().map(|item| (item.clone(), element.clone())));
                 }
             }
+            ("Pair", Value::Object(members, Some(source)))
+                if source.type_identity.as_deref() == Some("pkl:base#Pair") =>
+            {
+                for (member, ty) in [("first", args.first()), ("second", args.get(1))] {
+                    if let (Some(ty), Some(item)) = (modeled(ty), members.get(member)) {
+                        pairs.push((item.clone(), ty));
+                    }
+                }
+            }
+            ("Map" | "Mapping", Value::Object(entries, source))
+                if source
+                    .as_ref()
+                    .is_none_or(|source| source.type_name.is_none()) =>
+            {
+                let (key_ty, value_ty) = (modeled(args.first()), modeled(args.get(1)));
+                for (stored_key, entry) in entries.iter() {
+                    if let Some(key_ty) = &key_ty {
+                        pairs.push((self.entry_key_value(stored_key), key_ty.clone()));
+                    }
+                    if let Some(value_ty) = &value_ty {
+                        pairs.push((entry.clone(), value_ty.clone()));
+                    }
+                }
+            }
+            _ => {}
         }
-        self.type_mismatch_message(ty, val, None, scope)
+        for (item, item_ty) in pairs {
+            self.type_violation = None;
+            if let Ok(false) = self.eval_argument_check(&item, &item_ty, scope, 0, &mut Vec::new())
+            {
+                return Some(self.type_mismatch_message(&item_ty, &item, None, scope));
+            }
+        }
+        None
+    }
+
+    /// The key a `Map` or `Mapping` entry was stored under, as a value.
+    pub(super) fn entry_key_value(&self, stored_key: &str) -> Value {
+        self.mapping_key_values
+            .get(stored_key)
+            .cloned()
+            .unwrap_or_else(|| match render::class_key_name(stored_key) {
+                // `[String] = 1` keys by a class, which no evaluated key
+                // value was remembered for.
+                Some(class) => stdlib::class_value(class, format!("pkl:base#{class}")),
+                None => crate::value::mapping_storage_value(stored_key),
+            })
     }
 
     /// The error for `val` failing the check against `ty`: the constraint the
@@ -621,9 +686,20 @@ impl Evaluator {
                 violating_value_display(&violating, &text)
             );
         }
+        if let Some(message) = self.element_mismatch(ty, val, scope) {
+            return message;
+        }
+        let expected = top_level_error_type(ty, scope);
+        if is_null_value(val) && !matches!(ty, crate::parser::TypeExpr::Union(_)) {
+            return format!("Expected value of type `{expected}`, but got `null`.{location}");
+        }
+        if is_null_value(val) {
+            return format!(
+                "Expected value of type `{expected}`, but got `null`.\nValue: null{location}"
+            );
+        }
         format!(
-            "Expected value of type `{}`, but got type `{}`.\nValue: {}{location}",
-            error_type_expr(ty, scope),
+            "Expected value of type `{expected}`, but got type `{}`.\nValue: {}{location}",
             pkl_class_name(val),
             display_value(val)
         )
@@ -1025,6 +1101,11 @@ impl Evaluator {
                     };
                 }
                 if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
+                    if let Some(accepted) =
+                        self.check_generic_alias(val, name, args, &module_scope, depth, resolving)?
+                    {
+                        return Ok(accepted);
+                    }
                     return self.eval_alias_check(
                         val,
                         name,
@@ -1041,6 +1122,11 @@ impl Evaluator {
                 }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
+                    if let Some(accepted) =
+                        self.check_generic_alias(val, name, args, scope, depth, resolving)?
+                    {
+                        return Ok(accepted);
+                    }
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
                 if !value_is_type(val, ty) {
@@ -1049,6 +1135,52 @@ impl Evaluator {
                 self.check_type_arguments(val, name, args, scope, depth, resolving)
             }
         }
+    }
+
+    /// Check `val` against a generic alias used with type arguments
+    /// (`MyList<Int>`): the alias as written is checked with each parameter
+    /// bound to its argument. `None` when `name` is no generic alias or the
+    /// arguments do not match its parameters.
+    fn check_generic_alias(
+        &mut self,
+        val: &Value,
+        name: &str,
+        args: &[crate::parser::TypeExpr],
+        declaring: &Scope,
+        depth: usize,
+        resolving: &[String],
+    ) -> Result<Option<bool>> {
+        use crate::parser::TypeExpr;
+        let Some(TypeExpr::Generic(params, written)) =
+            declaring.get_type_alias(&generic_alias_key(name))
+        else {
+            return Ok(None);
+        };
+        let params: Vec<&str> = params.split(',').collect();
+        let Some(body) = written.first() else {
+            return Ok(None);
+        };
+        if params.len() != args.len() {
+            return Ok(None);
+        }
+        let key = alias_key(declaring, name);
+        if resolving.contains(&key) {
+            return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
+        }
+        let mut inner = declaring.child();
+        for (param, arg) in params.iter().zip(args) {
+            // An argument that is the parameter's own name stands for
+            // itself in the scope it was written in.
+            if !matches!(arg, TypeExpr::Named(arg) if arg == param) {
+                inner.set_type_alias(*param, arg.clone());
+            }
+        }
+        let body = body.clone();
+        // The parameters shadow aliases of the same name that are being
+        // resolved outside, so the body starts with its own guard.
+        let mut inner_resolving = vec![key];
+        self.eval_type_check_in(val, &body, &inner, depth + 1, &mut inner_resolving)
+            .map(Some)
     }
 
     /// Check the elements of a `List<T>`, `Set<T>`, `Listing<T>` or
@@ -1532,25 +1664,9 @@ impl Evaluator {
         {
             self.check_declared_value(val, &base, scope, depth)?;
         }
-        if let (crate::parser::TypeExpr::Generic(name, args), Value::List(items)) = (ty, val)
-            && matches!(name.as_str(), "List" | "Set")
-            && let [element] = args.as_slice()
-        {
-            for item in items.iter() {
-                self.check_declared_value(item, element, scope, depth)?;
-            }
-        }
-        if self.type_violation.is_some() {
-            return Err(Error::Eval(
-                self.type_mismatch_message(ty, val, None, scope),
-            ));
-        }
-        Err(Error::Eval(format!(
-            "Expected value of type `{}`, but got type `{}`.\nValue: {}",
-            display_type_expr(ty),
-            pkl_class_name(val),
-            super::stdlib::render_value(val)
-        )))
+        Err(Error::Eval(
+            self.type_mismatch_message(ty, val, None, scope),
+        ))
     }
 }
 
@@ -1649,3 +1765,33 @@ fn violating_value_display(value: &Value, text: &str) -> String {
 /// The start of the line after a type error that names the property whose
 /// value failed the check.
 pub(super) const PROPERTY_CONTEXT: &str = "\n\nin property '";
+
+/// The type an error names for a value that is not one: the class of a
+/// generic or nullable type, without its arguments or its `?`.
+fn top_level_error_type(ty: &crate::parser::TypeExpr, scope: &Scope) -> String {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(inner) => top_level_error_type(inner, scope),
+        TypeExpr::Generic(name, _) => name.trim_start_matches('*').to_string(),
+        // pkl names a class as its module declares it.
+        TypeExpr::Named(name) => match resolve_dotted(scope, name) {
+            Some(Value::Object(_, Some(source)))
+                if source.kind == ObjectKind::Class
+                    && source
+                        .type_identity
+                        .as_deref()
+                        .is_some_and(|identity| !identity.starts_with("pkl:")) =>
+            {
+                super::classes::qualified_class_name(source.type_identity.as_deref(), name)
+            }
+            _ => error_type_expr(ty, scope),
+        },
+        _ => error_type_expr(ty, scope),
+    }
+}
+
+/// The name a generic type alias's parameters and written target are kept
+/// under, beside the alias itself.
+pub(super) fn generic_alias_key(name: &str) -> String {
+    format!("\0generic:{name}")
+}

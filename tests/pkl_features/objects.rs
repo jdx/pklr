@@ -1535,7 +1535,10 @@ largeMatches = large is Int(this > 0, this < 10)
 #[test]
 fn failing_constraint_in_list_rejects_cast() {
     let message = eval_fails("result = 20 as Int(this > 0, this < 10)");
-    assert!(message.contains("cannot cast"));
+    assert!(
+        message.contains("Type constraint `this < 10` violated."),
+        "{message}"
+    );
 }
 
 #[test]
@@ -2137,7 +2140,10 @@ class Right {}
 result = new Left {} as Right
 "#,
     );
-    assert!(msg.contains("cannot cast Object to Right"), "{msg}");
+    assert!(
+        msg.contains("Expected value of type `test#Right`, but got type `test#Left`."),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -2492,7 +2498,10 @@ local x = "hello"
 result = x as Int
 "#,
     );
-    assert!(msg.contains("cannot cast"));
+    assert!(
+        msg.contains("Expected value of type `Int`, but got type `String`."),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -2573,7 +2582,10 @@ local x = -1
 result = x as Int(this > 0)
 "#,
     );
-    assert!(msg.contains("cannot cast"));
+    assert!(
+        msg.contains("Type constraint `this > 0` violated."),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -5312,7 +5324,7 @@ m: Mapping<String, R | Listing<Int>> = new {
 "#,
     );
     assert!(
-        error.contains("Expected value of type `Mapping<String, R|Listing<Int>>`"),
+        error.contains("Expected value of type `R|Listing<Int>`"),
         "{error}"
     );
 }

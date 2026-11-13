@@ -788,11 +788,9 @@ impl Evaluator {
                 if matches {
                     Ok(val)
                 } else {
-                    Err(Error::Eval(format!(
-                        "cannot cast {} to {}",
-                        value_type_name(&val),
-                        display_type_expr(ty)
-                    )))
+                    Err(Error::Eval(
+                        self.type_mismatch_message(ty, &val, None, scope),
+                    ))
                 }
             }
             Expr::Checked(expr, ty) => {

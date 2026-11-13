@@ -84,7 +84,7 @@ impl Evaluator {
                 Entry::ClassDef(name, modifiers, ..) if !modifiers.contains(&Modifier::Local) => {
                     exported.insert(name.as_str().into());
                 }
-                Entry::TypeAlias(name, _) if !module.local_type_aliases.contains(name) => {
+                Entry::TypeAlias(name, ..) if !module.local_type_aliases.contains(name) => {
                     exported.insert(name.as_str().into());
                 }
                 _ => {}
@@ -113,7 +113,7 @@ impl Evaluator {
             let own = module
                 .body
                 .iter()
-                .any(|entry| matches!(entry, Entry::TypeAlias(own, _) if own == &**name));
+                .any(|entry| matches!(entry, Entry::TypeAlias(own, ..) if own == &**name));
             if own || !base.type_aliases.contains_key(name) {
                 continue;
             }
@@ -523,13 +523,13 @@ impl Evaluator {
             // can write `new Alias.Name {}`.
             let exported = match entry {
                 Entry::ClassDef(name, ..) => Some(name),
-                Entry::TypeAlias(name, _) if class_names.contains(name.as_str()) => Some(name),
+                Entry::TypeAlias(name, ..) if class_names.contains(name.as_str()) => Some(name),
                 _ => None,
             };
             // A type alias named like an inherited property replaces that
             // member, so rendering the module renders the alias, which Pkl
             // rejects.
-            if let Entry::TypeAlias(name, _) = entry
+            if let Entry::TypeAlias(name, ..) = entry
                 && out.contains_key(name.as_str())
             {
                 let module_name = path.file_stem().and_then(|stem| stem.to_str());
@@ -825,7 +825,7 @@ impl Evaluator {
                 .iter()
                 .filter_map(|entry| match entry {
                     Entry::Property(prop) => Some(prop.name.as_ref()),
-                    Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name.as_str()),
+                    Entry::TypeAlias(name, ..) | Entry::ClassDef(name, ..) => Some(name.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -1455,8 +1455,8 @@ impl Evaluator {
                             Err(error) => return Err(error),
                         }
                     }
-                    Entry::TypeAlias(name, ty) => {
-                        self.eval_type_alias(name, ty, scope);
+                    Entry::TypeAlias(name, ty, generic) => {
+                        self.eval_type_alias(name, ty, generic.as_ref(), scope);
                         // A non-local alias to a class is a module member, like
                         // the class, and its value is schema, not data. An
                         // inherited property of the same name stays data.
@@ -1879,8 +1879,8 @@ impl Evaluator {
                                     );
                                 }
                             }
-                            Entry::TypeAlias(name, ty) => {
-                                self.eval_type_alias(name, ty, scope);
+                            Entry::TypeAlias(name, ty, generic) => {
+                                self.eval_type_alias(name, ty, generic.as_ref(), scope);
                             }
                             Entry::Property(prop) if &*prop.name == "output" && depth == 0 => {
                                 self.extract_converters_from_ast(prop, scope, depth);

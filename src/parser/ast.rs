@@ -74,8 +74,10 @@ pub enum Entry {
     /// Class definition: `[modifiers] class Name [extends Parent] { properties... }`
     /// Fields: (name, modifiers, optional_parent, body)
     ClassDef(String, Vec<Modifier>, Option<String>, Body),
-    /// Type alias: `typealias Name = Type`
-    TypeAlias(String, TypeExpr),
+    /// Type alias: `typealias Name = Type`. A generic alias also carries its
+    /// parameters and the target as written, the type stored in the first
+    /// field having them erased.
+    TypeAlias(String, TypeExpr, Option<GenericAlias>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -429,6 +431,9 @@ pub struct WhenGenerator {
     pub body: Body,
     pub else_body: Option<Body>,
 }
+
+/// The parameters of a generic type alias and its target as written.
+pub type GenericAlias = std::sync::Arc<(Vec<String>, TypeExpr)>;
 
 /// Replace the type parameters of a generic type alias in its target by
 /// `unknown`, which accepts every value. Evaluation does not know an alias's

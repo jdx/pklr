@@ -378,7 +378,7 @@ impl<'m> Walker<'m> {
                 Entry::ClassDef(name, _, parent, class_body) => {
                     bail!(self.class(name, parent.as_deref(), class_body));
                 }
-                Entry::TypeAlias(name, ty) => {
+                Entry::TypeAlias(name, ty, ..) => {
                     self.members.push(name);
                     let found = self.scoped(0, |walker| walker.type_expr(ty));
                     self.members.pop();
@@ -543,7 +543,7 @@ impl<'m> Walker<'m> {
                         .and_then(|body| self.entries(body, owner))
                 }),
             Entry::ClassDef(name, _, parent, body) => self.class(name, parent.as_deref(), body),
-            Entry::TypeAlias(name, ty) => {
+            Entry::TypeAlias(name, ty, ..) => {
                 let outer = self.frames.len() - 1;
                 self.members.push(name);
                 let found = self.scoped(outer, |walker| walker.type_expr(ty));
@@ -1025,7 +1025,7 @@ fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<(&'m 
                 }
             }
             Entry::ClassDef(_, _, _, body) => collect_calls_in_entries(body, called),
-            Entry::TypeAlias(_, ty) => collect_calls_in_type(ty, called),
+            Entry::TypeAlias(_, ty, ..) => collect_calls_in_type(ty, called),
         }
     }
 }

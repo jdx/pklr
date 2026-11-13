@@ -205,7 +205,7 @@ fn stdlib_alias_ignores_user_names() {
     let err = eval_fails("local function isBetween(a, b) = true\na: UInt8 = 300\n");
     assert!(err.contains("isBetween(0, 255)"), "{err}");
     let err = eval_fails("class Char {}\na: Char = 1\n");
-    assert!(err.contains("type `Char`"), "{err}");
+    assert!(err.contains("type `test#Char`"), "{err}");
 }
 
 #[test]

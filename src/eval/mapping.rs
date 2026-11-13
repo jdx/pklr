@@ -505,7 +505,7 @@ pub(super) fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr) -> Ve
 
     let mut names = Vec::new();
     match type_ann {
-        TypeExpr::Generic(name, params) if name == "Mapping" || name == "Map" => {
+        TypeExpr::Generic(name, params) if name == "Mapping" => {
             if let Some(value_type) = params.get(1) {
                 collect_mapping_value_type_names(value_type, &mut names);
             }
@@ -523,10 +523,7 @@ pub(super) fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr) -> Ve
 
 pub(super) fn mapping_value_type_from_name(name: &str) -> Option<String> {
     let name = name.trim_start_matches('*').trim_end_matches('?');
-    let inner = name
-        .strip_prefix("Mapping<")
-        .or_else(|| name.strip_prefix("Map<"))?
-        .strip_suffix('>')?;
+    let inner = name.strip_prefix("Mapping<")?.strip_suffix('>')?;
     let mut depth = 0usize;
     let bytes = inner.as_bytes();
     let mut index = 0;
@@ -835,8 +832,8 @@ impl Evaluator {
                     )?;
                     entry_scope.set(name, defaults);
                 }
-                Entry::TypeAlias(name, ty) => {
-                    self.eval_type_alias(name, ty, &mut entry_scope);
+                Entry::TypeAlias(name, ty, generic) => {
+                    self.eval_type_alias(name, ty, generic.as_ref(), &mut entry_scope);
                 }
                 _ => {}
             }

@@ -191,7 +191,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwTypeAlias => {
                 let is_local = header.has(Modifier::Local);
                 let entry = self.parse_type_alias(header)?;
-                if let (true, Entry::TypeAlias(name, _)) = (is_local, &entry) {
+                if let (true, Entry::TypeAlias(name, ..)) = (is_local, &entry) {
                     self.module_local_type_aliases.insert(name.clone());
                 }
                 entries.push(entry);
@@ -255,8 +255,11 @@ impl<'a> Parser<'a> {
         let outer = self.in_alias_definition.replace(name.clone());
         let ty = self.parse_type();
         self.in_alias_definition = outer;
-        let ty = erase_type_parameters(ty?, &parameters);
-        Ok(Entry::TypeAlias(name, ty))
+        let written = ty?;
+        let generic = (!parameters.is_empty())
+            .then(|| std::sync::Arc::new((parameters.clone(), written.clone())));
+        let ty = erase_type_parameters(written, &parameters);
+        Ok(Entry::TypeAlias(name, ty, generic))
     }
 
     /// Parse `<A, out B, in C>`, rejecting duplicate names.
