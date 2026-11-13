@@ -647,9 +647,16 @@ fn type_has_constraint(
     }
 }
 
+const CONSTRAINT_WEIGHT: usize = 64;
+
 /// The number of nodes in a type, counted up to `limit`.
 fn type_size(ty: &TypeExpr, limit: usize) -> usize {
-    let mut count = 1;
+    // A constraint carries its predicate, so a copy costs far more than a node.
+    let mut count = if matches!(ty, TypeExpr::Constrained(..)) {
+        CONSTRAINT_WEIGHT
+    } else {
+        1
+    };
     let children: &[TypeExpr] = match ty {
         TypeExpr::Nullable(inner) => std::slice::from_ref(inner),
         TypeExpr::Union(items) | TypeExpr::Generic(_, items) => items,
@@ -685,7 +692,7 @@ fn expand_alias(
                 estimate = estimate.saturating_add(
                     params
                         .iter()
-                        .position(|p| p == n)
+                        .position(|p| p == n.trim_start_matches('*'))
                         .and_then(|i| arg_sizes.get(i).copied())
                         .unwrap_or(1),
                 );
@@ -698,7 +705,7 @@ fn expand_alias(
                 estimate += 1;
                 stack.extend(items.iter());
             }
-            TypeExpr::Constrained(..) => estimate += 1,
+            TypeExpr::Constrained(..) => estimate += CONSTRAINT_WEIGHT,
         }
         if estimate >= EXPANSION_LIMIT {
             return None;
@@ -711,11 +718,21 @@ fn expand_alias(
 fn substitute_type(ty: &TypeExpr, params: &[String], args: &[TypeExpr]) -> TypeExpr {
     let go = |inner: &TypeExpr| substitute_type(inner, params, args);
     match ty {
-        TypeExpr::Named(name) => params
-            .iter()
-            .position(|param| param == name)
-            .and_then(|index| args.get(index).cloned())
-            .unwrap_or_else(|| ty.clone()),
+        TypeExpr::Named(name) => {
+            // `*T` marks a union default; the argument keeps that marker.
+            let bare = name.trim_start_matches('*');
+            match params
+                .iter()
+                .position(|param| param == bare)
+                .and_then(|index| args.get(index))
+            {
+                Some(TypeExpr::Named(arg)) if bare.len() != name.len() => {
+                    TypeExpr::Named(format!("*{}", arg.trim_start_matches('*')))
+                }
+                Some(arg) => arg.clone(),
+                None => ty.clone(),
+            }
+        }
         // A parameter used as the base of a constraint stays constrained.
         TypeExpr::Constrained(..) => ty.clone(),
         TypeExpr::Nullable(inner) => TypeExpr::Nullable(Box::new(go(inner))),

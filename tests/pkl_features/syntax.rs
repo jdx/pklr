@@ -3392,6 +3392,7 @@ fn reference_referent_type_rejects_constraints() {
     for src in [
         "import \"pkl:ref\"\ntypealias Ref<T> = ref.Reference<ref.Domain, T>\ntypealias Ref2<T> = Ref<T>\nfoo: Ref2<String(isEmpty)>",
         "import \"pkl:ref\"\ntypealias Ref<T> = ref.Reference<ref.Domain, T>\ntypealias Ref2<T> = Ref<T(isEmpty)>\nfoo: Ref2<String>",
+        "import \"pkl:ref\"\ntypealias Pick<T> = String | *T\nfoo: ref.Reference<ref.Domain, Pick<Int(this > 0)>>",
         "import \"pkl:ref\"\ntypealias Foo1 = Foo2\ntypealias Foo2 = String(isEmpty)\nfoo: ref.Reference<ref.Domain, Foo1>",
     ] {
         let err = eval_fails(src);
