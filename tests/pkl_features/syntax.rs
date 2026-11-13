@@ -3672,3 +3672,20 @@ result = (base) { m = 3 }
     let err = eval_fails("class App { m: Int; x = m + 1 }\nr = new App {}.x\n");
     assert!(err.contains("`x`") || err.contains("`m`"), "{err}");
 }
+
+#[test]
+fn member_reading_a_hidden_unset_property_reports_the_read() {
+    let err = eval_fails("class App { hidden m: Int; x = m + 1 }\nr = new App {}\n");
+    assert!(
+        err.contains("Tried to read property `m` but its value is undefined"),
+        "{err}"
+    );
+    let json = eval(
+        r#"
+class App { hidden m: Int; x = m + 1 }
+local base = new App {}
+result = (base) { m = 3 }
+"#,
+    );
+    assert_eq!(json["result"]["x"], 4);
+}

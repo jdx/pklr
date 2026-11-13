@@ -3,6 +3,9 @@
 use super::listing::bind_listing_member;
 use super::*;
 
+/// What every undefined-property message ends with.
+const UNDEFINED_SUFFIX: &str = "but its value is undefined.";
+
 impl Evaluator {
     /// Rewrite assignments of untyped `new` on an instance to amend the
     /// corresponding property of its class default object.
@@ -618,6 +621,45 @@ impl Evaluator {
             .collect::<HashSet<_>>();
         let mut type_failures = IndexMap::new();
         if let Value::Object(map, source) = &result {
+            // A hidden member left undefined is never rendered itself, but a
+            // member that reads it could not be evaluated and is left out of
+            // the object: reading or rendering that member reports the read.
+            let hidden_undefined = base_entries.iter().find_map(|entry| match entry {
+                Entry::Property(prop)
+                    if prop.value.is_none()
+                        && prop.body.is_none()
+                        && prop.type_ann.is_some()
+                        && has_modifier(&prop.modifiers, Modifier::Hidden)
+                        && !has_modifier(&prop.modifiers, Modifier::Local)
+                        && !assigned_property_names.contains(prop.name.as_ref())
+                        && prop
+                            .type_ann
+                            .as_ref()
+                            .is_some_and(|ty| type_lacks_default(ty, &eval_scope)) =>
+                {
+                    Some(prop.name.clone())
+                }
+                _ => None,
+            });
+            if let Some(hidden) = hidden_undefined {
+                for entry in merged.iter() {
+                    if let Entry::Property(prop) = entry
+                        && prop.value.is_some()
+                        && !map.contains_key(prop.name.as_ref())
+                        && ![Modifier::Hidden, Modifier::Local]
+                            .into_iter()
+                            .any(|m| has_modifier(&prop.modifiers, m))
+                    {
+                        type_failures.insert(
+                            prop.name.clone(),
+                            PoisonedMember {
+                                message: undefined_property_message(&hidden),
+                                rendered: true,
+                            },
+                        );
+                    }
+                }
+            }
             let mut member_scope: Option<Scope> = None;
             for entry in base_entries.iter() {
                 let Entry::Property(prop) = entry else {
@@ -730,7 +772,7 @@ impl Evaluator {
         let has_stale_undefined = |source: &ObjectSource, map: &ObjectMap| {
             source.poisoned_members.as_deref().is_some_and(|members| {
                 members.iter().any(|(name, member)| {
-                    map.contains_key(&**name) && member.message == undefined_property_message(name)
+                    map.contains_key(&**name) && member.message.ends_with(UNDEFINED_SUFFIX)
                 })
             })
         };
@@ -746,7 +788,7 @@ impl Evaluator {
                 .cloned()
                 .unwrap_or_default();
             poisoned.retain(|name, member| {
-                !(map.contains_key(&**name) && member.message == undefined_property_message(name))
+                !(map.contains_key(&**name) && member.message.ends_with(UNDEFINED_SUFFIX))
             });
             poisoned.extend(type_failures);
             source.poisoned_members = Some(Arc::new(poisoned));
