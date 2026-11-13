@@ -38,6 +38,7 @@ mod package;
 mod parsers;
 mod prefetch;
 mod reflect;
+mod relative_path;
 mod remote;
 pub(crate) mod render;
 mod resource;

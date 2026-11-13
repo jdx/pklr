@@ -1002,7 +1002,12 @@ impl Evaluator {
                                 && matches!(explicit_default, None | Some(Value::List(_)))
                                 && is_element_only_body(body)))
                     {
-                        if find_listing_body_property(body).is_some() {
+                        let amends_dynamic = !listing_value_type
+                            && matches!(
+                                map.get(&storage_key),
+                                Some(Value::List(items)) if items.kind() == ListKind::Dynamic
+                            );
+                        if !amends_dynamic && find_listing_body_property(body).is_some() {
                             return Err(Error::Eval(
                                 "Object of type `Listing` cannot have a property (other than \
                                  `default`)."

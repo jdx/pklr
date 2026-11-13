@@ -1394,6 +1394,14 @@ fn list_property(list: &Value, items: &ListValue, name: &str) -> Option<Result<V
         )),
         "first" | "last" | "single" | "rest" | "firstOrNull" | "lastOrNull" | "singleOrNull"
         | "restOrNull" | "lastIndex" => list_element_member(list, items, name),
+        "start" | "end" | "step" => {
+            let (start, end, step) = items.int_seq_bounds()?;
+            Ok(Value::Int(match name {
+                "start" => start,
+                "end" => end,
+                _ => step,
+            }))
+        }
         _ => return None,
     })
 }
