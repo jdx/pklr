@@ -31,6 +31,23 @@ impl Evaluator {
     /// The `module` binding's value, which has no source of its own, carrying
     /// the module's class so `module.getClass()` can name it. A scope that
     /// does not know its module (a lambda body) keeps the plain value.
+    /// `val` as a type check sees it: the scope's own `module` snapshot, which
+    /// has no source and would pass for a `Map`, becomes a module value. A
+    /// `this` bound to something else (a constraint's receiver) is untouched.
+    pub(super) fn module_for_type_check(&self, val: &Value, scope: &Scope) -> Option<Value> {
+        let Value::Object(props, None) = val else {
+            return None;
+        };
+        match scope.get("module") {
+            Some(Value::Object(module, None)) if Arc::ptr_eq(props, module) => {}
+            _ => return None,
+        }
+        Some(match self.module_with_class(props, scope) {
+            Value::Object(props, None) => Value::Object(props, Some(module_source(None))),
+            with_class => with_class,
+        })
+    }
+
     pub(super) fn module_with_class(&self, props: &Arc<ObjectMap>, scope: &Scope) -> Value {
         let Some(namespace) = scope.type_namespace.as_deref() else {
             return Value::Object(Arc::clone(props), None);
@@ -2840,6 +2857,10 @@ pub(super) fn settled_eq(old: Option<&Value>, new: Option<&Value>) -> bool {
 /// The source that names a module's class, so `module.getClass()` can tell
 /// which module the value is.
 fn module_binding_source(name: &str, namespace: &str) -> Arc<ObjectSource> {
+    module_source(Some(stdlib::module_class_identity(name, namespace)))
+}
+
+fn module_source(type_identity: Option<String>) -> Arc<ObjectSource> {
     Arc::new(ObjectSource {
         entries: Vec::new().into(),
         captured: SourceScope::default(),
@@ -2847,7 +2868,7 @@ fn module_binding_source(name: &str, namespace: &str) -> Arc<ObjectSource> {
         is_open: true,
         is_abstract: false,
         type_name: None,
-        type_identity: Some(stdlib::module_class_identity(name, namespace)),
+        type_identity,
         parent_type_names: Vec::new(),
         parent_type_identities: Vec::new(),
         entry_scopes: Vec::new(),

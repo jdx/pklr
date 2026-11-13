@@ -3577,6 +3577,50 @@ c = (module as Typed) != null
 }
 
 #[test]
+fn module_is_typed_in_unions_and_annotations() {
+    let json = eval(
+        r#"
+a = module is Typed|String
+b = (module as Typed|Int) != null
+function f(m: Typed) = 1
+c = f(module)
+d = module is Dynamic
+e = module is Map
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], 1);
+    assert_eq!(json["d"], false);
+    assert_eq!(json["e"], false);
+}
+
+#[test]
+fn module_is_not_typed_when_typed_is_a_user_alias() {
+    let json = eval(
+        r#"
+typealias Typed = String
+a = module is Typed
+"#,
+    );
+    assert_eq!(json["a"], false);
+}
+
+#[test]
+fn constraint_map_is_not_a_module() {
+    let json = eval(
+        r#"
+a = Map(1, "one") is Map(this is Typed)
+b = Map(1, "one") is Map(this is Map)
+"#,
+    );
+    assert_eq!(json["a"], false);
+    assert_eq!(json["b"], true);
+    let err = eval_fails(r#"a = Map(1, "one") as Map(this is Typed)"#);
+    assert!(err.contains("this is Typed"), "{err}");
+}
+
+#[test]
 fn long_alias_chain_is_a_valid_supertype() {
     let json = eval(
         "open class Foo { value = 7 }\ntypealias A1 = Foo\ntypealias A2 = A1\ntypealias A3 = A2\ntypealias A4 = A3\ntypealias A5 = A4\ntypealias A6 = A5\ntypealias A7 = A6\ntypealias A8 = A7\ntypealias A9 = A8\ntypealias A10 = A9\ntypealias A11 = A10\ntypealias A12 = A11\ntypealias A13 = A12\ntypealias A14 = A13\ntypealias A15 = A14\ntypealias A16 = A15\ntypealias A17 = A16\ntypealias A18 = A17\ntypealias A19 = A18\ntypealias A20 = A19\nclass Baz extends A20 {}\nx = new Baz {}.value\n",

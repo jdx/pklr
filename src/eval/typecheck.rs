@@ -585,6 +585,11 @@ impl Evaluator {
         depth: usize,
     ) -> Result<bool> {
         self.type_violation = None;
+        if matches!(val, Value::Object(_, None))
+            && let Some(module) = self.module_for_type_check(val, scope)
+        {
+            return self.eval_type_check_in(&module, ty, scope, depth, &mut Vec::new());
+        }
         self.eval_type_check_in(val, ty, scope, depth, &mut Vec::new())
     }
 
