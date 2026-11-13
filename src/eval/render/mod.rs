@@ -1135,7 +1135,14 @@ pub(crate) fn cannot_render_type(value: &Value, kind: Kind, name: &str) -> Error
     Error::Eval(format!(
         "Cannot render value of type `{}` as {name}.\nValue: {}\n\nConsider adding a converter to `output.converters`.",
         kind.pkl_class(value),
-        unforced_object_display(value, kind).unwrap_or_else(|| display_value(value)),
+        unforced_object_display(value, kind).unwrap_or_else(|| match value {
+            // Here pkl shows a `Listing`'s elements, unlike the top-level
+            // type errors, which show `?` for each.
+            Value::List(items) if kind == Kind::Listing && !items.is_empty() => {
+                crate::eval::stdlib::render_value(value)
+            }
+            _ => display_value(value),
+        }),
     ))
 }
 

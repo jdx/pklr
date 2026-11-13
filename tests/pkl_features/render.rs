@@ -1782,3 +1782,48 @@ fn text_output_with_an_unrelated_path_converter_keeps_a_failed_member_failing() 
     let err = pklr::eval_to_text(&path).unwrap_err().to_string();
     assert!(err.contains("`age`"), "{err}");
 }
+
+#[test]
+fn json_renderer_int_seq_converter_reads_start_end_step() {
+    let json = eval(
+        r#"
+local seq = IntSeq(1, 7).step(3)
+res = List(seq.start, seq.end, seq.step)
+"#,
+    );
+    assert_eq!(json["res"], serde_json::json!([1, 7, 3]));
+}
+
+#[test]
+fn error_messages_quote_listings_and_maps() {
+    let json = eval(
+        r#"
+import "pkl:test"
+res1 = test.catch(() -> new PropertiesRenderer {}.renderValue(new Listing { "a"; "b" }))
+res2 = test.catch(() -> new Listing { ...Map("a", 1) })
+"#,
+    );
+    assert_eq!(
+        json["res1"],
+        "Cannot render value of type `Listing` as Properties. Value: new Listing { \"a\"; \"b\" }"
+    );
+    assert_eq!(
+        json["res2"],
+        "Cannot spread value of type `Map` into object of type `Listing`. Value: Map(\"a\", 1)"
+    );
+}
+
+#[test]
+fn amending_a_to_mapping_entry_keeps_its_listing_elements() {
+    let json = eval(
+        r#"
+class Foo { names: Listing<String> }
+local foos = Map("bar", new Foo { names { "orig" } }).toMapping()
+res = (foos) { ["bar"] { names { "new" } } }
+"#,
+    );
+    assert_eq!(
+        json["res"]["bar"]["names"],
+        serde_json::json!(["orig", "new"])
+    );
+}

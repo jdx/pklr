@@ -84,6 +84,13 @@ impl Evaluator {
             };
             return int_seq(start, end, step);
         }
+        if let Expr::Field(obj_expr, method) = func_expr
+            && method == "relativePathTo"
+            && let [other] = args
+            && let Some(result) = self.relative_path_to(obj_expr, other, scope)
+        {
+            return result;
+        }
         // Handle method calls: obj.method(args)
         if let Expr::Field(obj_expr, method) = func_expr {
             let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
@@ -656,9 +663,14 @@ impl Evaluator {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
-            (Value::Object(map, source), "toMap" | "toMapping") => Ok(Some(Value::Object(
+            (Value::Object(map, source), "toMap") => Ok(Some(Value::Object(
                 without_class_members(map, source.as_deref()),
                 None,
+            ))),
+            // `Map.toMapping()` is a `Mapping`, which can be amended.
+            (Value::Object(map, source), "toMapping") => Ok(Some(Value::Object(
+                without_class_members(map, source.as_deref()),
+                Some(Arc::new(super::mapping::mapping_source())),
             ))),
             (Value::Object(map, _), "mapValues") => {
                 let lambda = args

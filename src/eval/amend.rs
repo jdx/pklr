@@ -1176,6 +1176,11 @@ impl Evaluator {
             let needs_mapping_evaluation = body_has(overlay_entries, &|entry| {
                 matches!(entry, Entry::Spread(_))
                     || matches!(entry, Entry::Property(prop) if &*prop.name == "default")
+                    // A body that amends an existing object entry amends it
+                    // member by member, which the general path (replacing
+                    // whatever the body redefines) does not.
+                    || matches!(entry, Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_))
+                        if matches!(base_map.get(&**key), Some(Value::Object(_, Some(_)))))
             });
             if !base_src.is_metadata_only() || !needs_mapping_evaluation {
                 // Unannotated mapping entries with bodies still use the general

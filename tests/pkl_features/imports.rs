@@ -4509,3 +4509,54 @@ fn import_glob_keys_keep_the_prefix_for_hidden_files() {
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["keys"], serde_json::json!(["./.hidden.pkl"]));
 }
+
+#[test]
+fn relative_path_to_gives_the_descendent_directories() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to");
+    let dir = temp.path().join("a").join("b");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("leaf.pkl"), "x = 1\n").unwrap();
+    std::fs::write(temp.path().join("sibling.pkl"), "x = 1\n").unwrap();
+    let root = temp.path().join("root.pkl");
+    std::fs::write(
+        &root,
+        r#"
+import "a/b/leaf.pkl" as leaf
+import "sibling.pkl"
+
+down = module.relativePathTo(leaf)
+sideways = module.relativePathTo(sibling)
+self = module.relativePathTo(module)
+viaImport = module.relativePathTo(import("a/b/leaf.pkl"))
+"#,
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&root).unwrap();
+    assert_eq!(json["down"], serde_json::json!(["a", "b"]));
+    assert_eq!(json["sideways"], serde_json::json!([]));
+    assert_eq!(json["self"], serde_json::json!([]));
+    assert_eq!(json["viaImport"], serde_json::json!(["a", "b"]));
+}
+
+#[test]
+fn relative_path_to_fails_without_a_descendent_path() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to_none");
+    let dir = temp.path().join("a");
+    std::fs::create_dir_all(&dir).unwrap();
+    let leaf = dir.join("leaf.pkl");
+    std::fs::write(
+        &leaf,
+        r#"
+import "../root.pkl" as root
+
+res = module.relativePathTo(root)
+"#,
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("root.pkl"), "x = 1\n").unwrap();
+    let err = pklr::eval_to_json(&leaf).unwrap_err().to_string();
+    assert!(
+        err.contains("No descendent path exists between modules"),
+        "{err}"
+    );
+}
