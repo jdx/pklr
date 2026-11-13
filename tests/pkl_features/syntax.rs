@@ -3596,6 +3596,26 @@ e = module is Map
 }
 
 #[test]
+fn module_is_not_a_mapping_or_map() {
+    let json = eval(
+        r#"
+a = module is Mapping
+b = module is Mapping<String, Int>
+c = module is Map<String, Int>
+d = module is Map
+function f(m: Typed) = 1
+e = f(module)
+"#,
+    );
+    for key in ["a", "b", "c", "d"] {
+        assert_eq!(json[key], false, "{key}");
+    }
+    assert_eq!(json["e"], 1);
+    assert!(eval_fails("a = module as Mapping").contains("Mapping"));
+    assert!(eval_fails("function h(m: Mapping) = 1\nr = h(module)").contains("Mapping"));
+}
+
+#[test]
 fn module_is_not_typed_when_typed_is_a_user_alias() {
     let json = eval(
         r#"
