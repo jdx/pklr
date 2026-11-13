@@ -83,6 +83,8 @@ pub enum Entry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Property {
     pub annotations: Vec<Annotation>,
+    /// The doc comment in front of the member, without the `///` markers.
+    pub doc: Option<std::sync::Arc<str>>,
     pub modifiers: Vec<Modifier>,
     pub name: std::sync::Arc<str>,
     pub type_ann: Option<TypeExpr>,

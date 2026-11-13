@@ -246,6 +246,16 @@ fn object_class_name(source: &Option<std::sync::Arc<ObjectSource>>) -> &str {
         .unwrap_or("Dynamic")
 }
 
+/// The name of the module file in `namespace`, without its directory and
+/// extension.
+fn module_file_name(namespace: &str) -> &str {
+    namespace
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(namespace)
+        .trim_end_matches(".pkl")
+}
+
 /// A class's `toString()`: `Int` for a standard library class and
 /// `module#Class` otherwise, naming the module by its file. (pkl names a
 /// module with a `module` declaration by that name instead.)
@@ -266,12 +276,7 @@ fn class_display_name(source: &ObjectSource) -> String {
         .and_then(|namespace| namespace.strip_suffix('.'));
     match namespace {
         Some(namespace) => {
-            let module = namespace
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(namespace)
-                .trim_end_matches(".pkl");
-            format!("{module}#{name}")
+            format!("{}#{name}", module_file_name(namespace))
         }
         None => name.to_string(),
     }
@@ -341,7 +346,19 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
         {
             // The alias's identity is an internal member, not public text.
             match map.get(super::TYPE_ALIAS_NAME_KEY) {
-                Some(Value::String(name)) => out.push_str(name),
+                Some(Value::String(name)) => {
+                    // A user's alias is named by its module, as its class is.
+                    if let Some(Value::String(identity)) = map.get(super::TYPE_ALIAS_IDENTITY_KEY)
+                        && let Some(module) = identity
+                            .strip_suffix(&**name)
+                            .and_then(|namespace| namespace.strip_suffix('.'))
+                            .map(module_file_name)
+                    {
+                        out.push_str(module);
+                        out.push('#');
+                    }
+                    out.push_str(name);
+                }
                 _ => out.push_str("TypeAlias"),
             }
         }

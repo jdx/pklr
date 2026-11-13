@@ -404,6 +404,9 @@ impl Evaluator {
         let mapping_entries = mapping_context
             || inherited_source.is_some_and(|source| source.kind == ObjectKind::Mapping);
         let mut child_scope = scope.child();
+        if crate::parser::BARE_GET_CLASS.load(std::sync::atomic::Ordering::Relaxed) {
+            child_scope.set(THIS_CLASS, this_class(inherited_source, mapping_entries));
+        }
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
         // Inherited members whose entries are evaluated again below. Until its
@@ -2286,6 +2289,25 @@ fn collect_generated_locals(body: &Body, out: &mut Vec<Name>) {
             _ => {}
         }
     }
+}
+
+/// The binding of the class of the object body being evaluated, for a
+/// `getClass()` called without a receiver.
+pub(super) const THIS_CLASS: &str = "\0pklr:this-class";
+
+#[inline(never)]
+fn this_class(source: Option<&ObjectSource>, mapping: bool) -> Value {
+    if let Some(source) = source
+        && let Some(name) = source.type_name()
+    {
+        let identity = source
+            .type_identity
+            .clone()
+            .unwrap_or_else(|| format!("pkl:base#{name}"));
+        return stdlib::class_value(name, identity);
+    }
+    let name = if mapping { "Mapping" } else { "Dynamic" };
+    stdlib::class_value(name, format!("pkl:base#{name}"))
 }
 
 /// Whether `ty`, directly or through type aliases, is a constrained `Dynamic`.

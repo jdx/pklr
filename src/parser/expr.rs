@@ -109,6 +109,9 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect2(&TokenKind::RParen, ")", ",")?;
+        if args.is_empty() && matches!(&callee, Expr::Ident(name) if name == "getClass") {
+            BARE_GET_CLASS.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(Expr::Call(Box::new(callee), args))
     }
 

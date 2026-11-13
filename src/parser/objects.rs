@@ -287,6 +287,7 @@ impl<'a> Parser<'a> {
         Ok(Entry::Property(std::sync::Arc::new(Property {
             modifiers: header.modifiers(),
             annotations: header.annotations,
+            doc: header.doc,
             name: name.into(),
             type_ann,
             value,

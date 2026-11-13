@@ -980,6 +980,7 @@ impl Evaluator {
             if !replaced {
                 Arc::make_mut(&mut source.entries).push(Entry::Property(Arc::new(Property {
                     annotations: Vec::new(),
+                    doc: None,
                     modifiers: Vec::new(),
                     name: key.clone(),
                     type_ann: None,
@@ -1392,6 +1393,7 @@ impl Evaluator {
                         let reads_siblings = {
                             let refs = property_reference_names(&Property {
                                 annotations: Vec::new(),
+                                doc: None,
                                 modifiers: Vec::new(),
                                 name: "".into(),
                                 type_ann: None,
@@ -1823,6 +1825,7 @@ pub(super) fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
             .collect();
         refs.extend(property_reference_names(&Property {
             annotations: Vec::new(),
+            doc: None,
             modifiers: Vec::new(),
             name: "".into(),
             type_ann: None,

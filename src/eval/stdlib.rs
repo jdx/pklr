@@ -122,6 +122,7 @@ pub(super) fn dynamic_object(
             if is_property(i) {
                 Entry::Property(Arc::new(Property {
                     annotations: Vec::new(),
+                    doc: None,
                     modifiers: Vec::new(),
                     name: name.clone(),
                     type_ann: None,
@@ -253,6 +254,14 @@ pub(super) fn module_class_identity(name: &str, namespace: &str) -> String {
 }
 
 const MODULE_IDENTITY_PREFIX: &str = "\0module:";
+
+/// The namespace a module class identity (see `module_class_identity`) carries.
+pub(crate) fn module_class_namespace(identity: &str) -> Option<&str> {
+    identity
+        .strip_prefix(MODULE_IDENTITY_PREFIX)?
+        .split_once('\0')
+        .map(|(_, namespace)| namespace)
+}
 
 /// The name a module class identity (see `module_class_identity`) carries.
 pub(crate) fn module_class_name(identity: &str) -> Option<&str> {
@@ -411,6 +420,7 @@ pub(super) fn index(value: &Value, key: &Value) -> Option<Result<Value>> {
 pub(super) fn module(name: &str) -> Option<Value> {
     match name {
         "math" => Some(math::module()),
+        "reflect" => Some(super::reflect::module()),
         _ => None,
     }
 }
@@ -500,4 +510,12 @@ impl Evaluator {
             other => Err(type_mismatch("Boolean", &other)),
         }
     }
+}
+
+/// Whether `source` is the value of a module rather than of a class.
+pub(crate) fn is_module_class(source: &ObjectSource) -> bool {
+    source
+        .type_identity
+        .as_deref()
+        .is_some_and(|identity| module_class_name(identity).is_some())
 }
