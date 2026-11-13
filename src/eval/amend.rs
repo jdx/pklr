@@ -441,6 +441,14 @@ impl Evaluator {
                 merged_entry_scopes.push(amendment_entry_scope.clone());
                 continue;
             }
+            // A body amendment `["key"] { ... }` of an entry the overlay
+            // replaced would amend the replacement, so it is dropped.
+            if let Entry::DynProperty(key, Expr::ObjectBody(_)) = entry
+                && let Some(key) = literal_key(key)
+                && replaced_entries.contains(&key)
+            {
+                continue;
+            }
             merged.push(shadow_local_reads(entry, &shadowed));
             merged_entry_scopes.push(inherited_entry_scope);
         }
@@ -2268,6 +2276,10 @@ fn literal_entry_key(entry: &Entry) -> Option<String> {
     if matches!(value, Expr::ObjectBody(_)) {
         return None;
     }
+    literal_key(key)
+}
+
+fn literal_key(key: &Expr) -> Option<String> {
     match key {
         Expr::String(s) => Some(format!("s:{s}")),
         Expr::Int(n) => Some(format!("i:{n}")),

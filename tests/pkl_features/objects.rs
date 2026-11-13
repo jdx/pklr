@@ -8179,3 +8179,18 @@ fn spreading_a_dynamic_whose_skipped_generator_holds_a_property_works() {
     );
     assert_eq!(v["r"], 1);
 }
+
+#[test]
+fn replacing_an_amended_mapping_entry_drops_its_old_body_amendments() {
+    let v = eval(
+        "a = new Mapping { [\"k\"] = new Dynamic { x = 1 } }\n\
+         b = (a) { [\"k\"] { y = 2 } }\n\
+         c = (b) { [\"k\"] = new Dynamic { z = 3 } }\n\
+         r = c[\"k\"]\n\
+         local u = new { [\"k\"] = 1 }\n\
+         m = new Mapping { ...u }\n\
+         n = m[\"k\"]",
+    );
+    assert_eq!(v["r"], serde_json::json!({"z": 3}));
+    assert_eq!(v["n"], 1);
+}

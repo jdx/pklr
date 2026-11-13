@@ -1215,7 +1215,9 @@ impl Evaluator {
                 Entry::Spread(e) => {
                     let val = self.eval_expr(e, &entry_scope, depth + 1)?;
                     check_iterable(&val)?;
-                    if let Value::List(items) = &val {
+                    if let Value::List(items) = &val
+                        && !(items.kind() == ListKind::Dynamic && items.is_empty())
+                    {
                         return Err(match items.kind() {
                             ListKind::Listing | ListKind::Dynamic => Error::Eval(
                                 "Cannot spread object containing elements into object of type \
@@ -1237,7 +1239,9 @@ impl Evaluator {
                         && !m.is_empty()
                     {
                         // A `Dynamic` may hold only entries, which spread.
-                        let has_properties = source.kind != ObjectKind::Dynamic
+                        let entries_only_kind = source.kind == ObjectKind::Dynamic
+                            || (source.kind == ObjectKind::Object && source.type_name.is_none());
+                        let has_properties = !entries_only_kind
                             || source
                                 .evaluated_properties
                                 .iter()
