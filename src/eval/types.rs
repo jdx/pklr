@@ -86,9 +86,14 @@ pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
 /// unknown when the lambda is called, and `x is Alias` would check against a
 /// class or built-in of the same name instead. Names declared again by a
 /// `typealias` or `class` in a body inside the lambda keep their inner meaning.
-pub(super) fn capture_type_aliases(expr: &mut Expr, scope: &Scope) {
+pub(super) fn capture_type_aliases(
+    expr: &mut Expr,
+    scope: &Scope,
+    deferred: &HashMap<usize, (Arc<Expr>, Arc<str>)>,
+) {
     AliasResolver {
         scope,
+        deferred,
         bindings: Vec::new(),
         expanding: Vec::new(),
     }
@@ -97,6 +102,9 @@ pub(super) fn capture_type_aliases(expr: &mut Expr, scope: &Scope) {
 
 struct AliasResolver<'a> {
     scope: &'a Scope,
+    /// Lambda bodies whose const violation waits for the call, by address: a
+    /// copy of the body made here would otherwise lose it.
+    deferred: &'a HashMap<usize, (Arc<Expr>, Arc<str>)>,
     /// Type parameters of the generic alias being expanded, with the
     /// arguments they stand for.
     bindings: Vec<(String, crate::parser::TypeExpr)>,
@@ -127,7 +135,13 @@ impl AliasResolver<'_> {
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value, shadowed),
-            Expr::Lambda(_, value) => self.expr(Arc::make_mut(value), shadowed),
+            Expr::Lambda(_, value) => {
+                if let Some((_, message)) = self.deferred.get(&(Arc::as_ptr(value) as usize)) {
+                    *value = Arc::new(Expr::Throw(Box::new(Expr::String(Arc::clone(message)))));
+                } else {
+                    self.expr(Arc::make_mut(value), shadowed)
+                }
+            }
             Expr::Index(left, right) | Expr::Binop(_, left, right) | Expr::Let(_, left, right) => {
                 self.expr(left, shadowed);
                 self.expr(right, shadowed);

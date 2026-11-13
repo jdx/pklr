@@ -14,6 +14,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::ast::{Annotation, Entry, Expr, Modifier, Property, StringInterpPart, TypeExpr};
 
@@ -37,10 +38,14 @@ impl ConstViolation {
 /// Find the first const-scope violation in a module body. `open` says the
 /// module amends or extends another, so it may have members the body does not
 /// declare.
-pub(super) fn find_const_violation(body: &[Entry], open: bool) -> Option<ConstViolation> {
+pub(super) fn find_const_violation(
+    body: &[Entry],
+    open: bool,
+) -> (Option<ConstViolation>, Vec<(Arc<Expr>, String)>) {
     let mut walker = Walker::new(body);
     walker.frames.push(Frame::object(members_of(body), open));
-    walker.module(body)
+    let found = walker.module(body);
+    (found, walker.deferred)
 }
 
 fn has(modifiers: &[Modifier], modifier: Modifier) -> bool {
@@ -329,6 +334,9 @@ struct Walker<'m> {
     pending: Vec<(&'m str, Pending, ConstViolation)>,
     /// The base types of the constraints being walked, innermost last.
     constraint_bases: Vec<&'m str>,
+    /// Violations inside a lambda passed to `catch`, which pkl raises only
+    /// when the lambda runs: the address of the lambda body and the message.
+    deferred: Vec<(Arc<Expr>, String)>,
 }
 
 fn violation(message: impl Into<String>) -> Option<ConstViolation> {
@@ -368,6 +376,7 @@ impl<'m> Walker<'m> {
             infos: HashMap::default(),
             pending: Vec::new(),
             constraint_bases: Vec::new(),
+            deferred: Vec::new(),
         }
     }
 
@@ -751,7 +760,20 @@ impl<'m> Walker<'m> {
                     }
                     other => self.expr(other),
                 };
-                callee_found.or_else(|| args.iter().find_map(|arg| self.expr(arg)))
+                let catches = matches!(callee.as_ref(), Expr::Field(_, name) | Expr::NullSafeField(_, name)
+                    if name == "catch" || name == "catchOrNull");
+                callee_found.or_else(|| {
+                    args.iter().find_map(|arg| {
+                        let found = self.expr(arg);
+                        match (found, arg, catches) {
+                            (Some(found), Expr::Lambda(_, body), true) => {
+                                self.deferred.push((Arc::clone(body), found.message()));
+                                None
+                            }
+                            (found, ..) => found,
+                        }
+                    })
+                })
             }
             Expr::Index(left, right) | Expr::Binop(_, left, right) => {
                 self.expr(left).or_else(|| self.expr(right))

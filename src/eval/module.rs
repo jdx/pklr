@@ -1626,6 +1626,15 @@ impl Evaluator {
                 .or_insert_with(|| (Arc::clone(body), Arc::new(module_evaluation_plan(body))))
                 .1,
         );
+        // The lambda bodies are keyed by address. `plan_cache` holds the
+        // module body for the evaluator's lifetime, so the addresses stay
+        // valid and cannot be reused by another allocation.
+        for (body, message) in &module.deferred_const_violations {
+            self.deferred_const.insert(
+                Arc::as_ptr(body) as usize,
+                (Arc::clone(body), Arc::from(message.as_str())),
+            );
+        }
         let mut todo = plan.order.clone();
         // A member can fail because it read another before that one could be
         // evaluated: through a dynamic `module[key]`, which the order can't

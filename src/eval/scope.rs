@@ -481,6 +481,23 @@ impl Scope {
             .or_else(|| self.parent.as_ref().and_then(|p| p.get(name)))
     }
 
+    /// The poisoned names of this scope and its parents that no nearer
+    /// binding replaces.
+    pub(super) fn flatten_poisoned(&self) -> Vec<(Name, String)> {
+        let mut poisoned = match &self.parent {
+            Some(parent) => parent.flatten_poisoned(),
+            None => Vec::new(),
+        };
+        if !poisoned.is_empty() {
+            poisoned.retain(|(name, _)| !self.vars.contains_key(&**name));
+        }
+        for (name, message) in self.poisoned.iter() {
+            poisoned.retain(|(other, _)| other != name);
+            poisoned.push((name.clone(), message.clone()));
+        }
+        poisoned
+    }
+
     pub(super) fn flatten(&self) -> ScopeMap {
         // The outermost levels (the module scope) usually hold most bindings:
         // cloning that map whole is much cheaper than reinserting each one.
@@ -809,6 +826,7 @@ pub(super) fn capture_scope(scope: &Scope) -> CapturedScope {
         module_identities: scope.flatten_module_identities(),
         type_aliases: scope.flatten_type_aliases(),
         type_namespace: scope.type_namespace.clone(),
+        poisoned: scope.flatten_poisoned(),
     }
 }
 
@@ -831,6 +849,7 @@ pub(super) fn capture_object_source_scope(source: &ObjectSource) -> CapturedScop
         module_identities: source.scope_module_identities().clone(),
         type_aliases: source.scope_type_aliases().clone(),
         type_namespace,
+        poisoned: Vec::new(),
     }
 }
 
@@ -851,6 +870,9 @@ pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
     }
     if !captured.type_aliases.is_empty() {
         scope.type_aliases = Arc::new(captured.type_aliases.clone());
+    }
+    if !captured.poisoned.is_empty() {
+        scope.poisoned = Arc::new(captured.poisoned.iter().cloned().collect());
     }
     scope
 }

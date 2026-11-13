@@ -107,6 +107,14 @@ pub struct Evaluator {
     /// The constraint (its source text) and the value that failed the last
     /// type check, for the error that reports it.
     type_violation: Option<(String, Value)>,
+    /// How many constraint bodies are being evaluated, and the value a nested
+    /// constraint last bound `this` to. pkl leaks that binding to the
+    /// enclosing constraint, which shows when the enclosing one fails.
+    constraint_nesting: u32,
+    /// Lambda bodies (by address) whose const-scope violation pkl raises when
+    /// the lambda runs, from the modules that declared them.
+    deferred_const: HashMap<usize, (Arc<Expr>, Arc<str>)>,
+    leaked_this: Option<Value>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
     /// Local imports whose `import_cache` entry is still the placeholder that
