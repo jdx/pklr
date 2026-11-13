@@ -472,6 +472,14 @@ impl Scope {
         }
     }
 
+    /// The alias `name` and the scope that declares it.
+    pub(super) fn type_alias_in(&self, name: &str) -> Option<(&crate::parser::TypeExpr, &Scope)> {
+        match self.type_aliases.get(name) {
+            Some(ty) => Some((&**ty, self)),
+            None => self.parent.as_deref()?.type_alias_in(name),
+        }
+    }
+
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
         self.type_aliases
             .get(name)

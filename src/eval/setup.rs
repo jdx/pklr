@@ -102,6 +102,7 @@ impl Evaluator {
             constraint_nesting: 0,
             deferred_const: HashMap::default(),
             leaked_this: None,
+            class_template_bodies: Vec::new(),
             failed_seen: false,
             last_coerced: None,
             eager_param_checks: 0,

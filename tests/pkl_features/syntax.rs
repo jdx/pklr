@@ -3547,3 +3547,49 @@ r = g.apply("Q").apply()
     assert_eq!(json["r"]["name"], "P");
     assert_eq!(json["r"]["x"], "Q");
 }
+
+#[test]
+fn generic_mapping_does_not_match_a_map() {
+    let json = eval(
+        r#"
+a = Map(1, "one") is Mapping<Int, String>
+b = Map(1, "one") is Map<Int, String>
+c = new Mapping { [1] = "one" } is Mapping<Int, String>
+"#,
+    );
+    assert_eq!(json["a"], false);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], true);
+}
+
+#[test]
+fn module_is_typed() {
+    let json = eval(
+        r#"
+a = module is Typed
+b = this is Typed
+c = (module as Typed) != null
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], true);
+}
+
+#[test]
+fn long_alias_chain_is_a_valid_supertype() {
+    let json = eval(
+        "open class Foo { value = 7 }\ntypealias A1 = Foo\ntypealias A2 = A1\ntypealias A3 = A2\ntypealias A4 = A3\ntypealias A5 = A4\ntypealias A6 = A5\ntypealias A7 = A6\ntypealias A8 = A7\ntypealias A9 = A8\ntypealias A10 = A9\ntypealias A11 = A10\ntypealias A12 = A11\ntypealias A13 = A12\ntypealias A14 = A13\ntypealias A15 = A14\ntypealias A16 = A15\ntypealias A17 = A16\ntypealias A18 = A17\ntypealias A19 = A18\ntypealias A20 = A19\nclass Baz extends A20 {}\nx = new Baz {}.value\n",
+    );
+    assert_eq!(json["x"], 7);
+}
+
+#[test]
+fn alias_target_resolves_where_the_alias_is_declared() {
+    let json = eval(
+        "open class Base { v = 1 }\ntypealias Parent = Base\nclass Child extends Parent {}\nx = new Child {}.v\n",
+    );
+    assert_eq!(json["x"], 1);
+    let err = eval_fails("typealias A = B\ntypealias B = A\nclass C extends A\n");
+    assert!(err.contains("must not be cyclic"), "{err}");
+}

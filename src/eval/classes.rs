@@ -18,8 +18,9 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        let parent_name = parent_name.map(|name| supertype_through_aliases(scope, name));
-        let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
+        let resolved = parent_name.map(|name| supertype_through_aliases(scope, name));
+        let parent_name = resolved.map(|(name, _)| name);
+        let parent_val = resolved.and_then(|(name, from)| resolve_dotted(from, name));
         if let Some(parent_name) = parent_name {
             check_supertype(scope, class_name, parent_name, parent_val.as_ref())?;
         }
@@ -123,6 +124,7 @@ impl Evaluator {
             Some(Value::Object(_, Some(parent))) => Some(Arc::clone(parent)),
             _ => None,
         };
+        self.class_template_bodies.push(Arc::as_ptr(body) as usize);
         let child_defaults = self.eval_entries_with_lexical_scopes(
             body,
             &child_receiver_scope,
@@ -132,7 +134,9 @@ impl Evaluator {
             Some(&inherited_non_const),
             false,
             None,
-        )?;
+        );
+        self.class_template_bodies.pop();
+        let child_defaults = child_defaults?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
             // Merge: parent defaults first, child overrides on top
             let mut merged: ObjectMap = (*parent_map).clone();
@@ -793,15 +797,25 @@ pub(super) fn qualified_class_name(identity: Option<&str>, name: &str) -> String
 /// Check that `class class_name extends parent_name` names a class pkl lets
 /// user code extend.
 /// An alias that only names another type, with no arguments or constraint,
-/// stands for that type as a supertype.
-pub(super) fn supertype_through_aliases<'a>(scope: &'a Scope, mut name: &'a str) -> &'a str {
-    for _ in 0..16 {
-        match scope.get_type_alias(name) {
-            Some(crate::parser::TypeExpr::Named(target)) => name = target.as_str(),
-            _ => break,
-        }
+/// stands for that type as a supertype. The target resolves where the alias
+/// was declared, so the scope that does so comes back with the name. A cycle
+/// stops the walk at the alias that closes it.
+pub(super) fn supertype_through_aliases<'a>(
+    scope: &'a Scope,
+    name: &'a str,
+) -> (&'a str, &'a Scope) {
+    let mut name = name;
+    let mut from = scope;
+    let mut seen = HashSet::default();
+    while seen.insert(name) {
+        let Some((crate::parser::TypeExpr::Named(target), declaring)) = from.type_alias_in(name)
+        else {
+            break;
+        };
+        name = target.as_str();
+        from = declaring;
     }
-    name
+    (name, from)
 }
 
 pub(super) fn check_supertype(

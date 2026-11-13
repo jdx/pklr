@@ -1791,8 +1791,15 @@ impl Evaluator {
                             })
                         })
                 };
-                st.failed_properties
-                    .retain(|(_, message)| !valueless(message));
+                // Only a class's defaults wait for an instance; an ordinary
+                // object has nothing to supply the member later.
+                if self
+                    .class_template_bodies
+                    .contains(&(Arc::as_ptr(cx.entries) as usize))
+                {
+                    st.failed_properties
+                        .retain(|(_, message)| !valueless(message));
+                }
                 if st.failed_properties.is_empty() {
                     break;
                 }

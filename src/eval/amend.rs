@@ -1998,6 +1998,9 @@ pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope
         Some(Value::Object(identities, _)) => (**identities).clone(),
         _ => ObjectMap::default(),
     };
+    // A marker from an enclosing capture goes stale when a nested scope
+    // rebinds the name as an inherited member; only the current ones stay.
+    markers.retain(|key, _| !key.starts_with(CAPTURED_DECLARED));
     for name in scope.flatten_declared() {
         if captured.contains_key(&*name) {
             markers.insert(format!("{CAPTURED_DECLARED}{name}").into(), Value::Null);
