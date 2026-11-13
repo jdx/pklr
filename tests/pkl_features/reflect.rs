@@ -286,12 +286,12 @@ argument = reflect.TypeAlias(Some).referent.typeArguments[0].referent.name
 }
 
 #[test]
-fn annotations_are_listings() {
+fn annotations_are_lists() {
     let result = with_snippet(
         r#"
-cls = reflect.Class(Pet).annotations is Listing
-prop = reflect.Class(Pet).properties["name"].annotations is Listing
-all = reflect.Class(Pet).properties["name"].allAnnotations is Listing
+cls = reflect.Class(Pet).annotations is List
+prop = reflect.Class(Pet).properties["name"].annotations is List
+all = reflect.Class(Pet).properties["name"].allAnnotations is List
 "#,
     );
     assert_eq!(result, json!({"cls": true, "prop": true, "all": true}));
@@ -400,4 +400,89 @@ message = reflect.Class(Shape).methods["area"].annotations[0].message
 "#,
     );
     assert_eq!(result["message"], json!("hi"));
+}
+
+#[test]
+fn members_mirror_their_types_and_defaults() {
+    let result = with_snippet(
+        r#"
+local name = reflect.Class(Pet).properties["name"]
+local age = reflect.Class(Pet).properties["age"]
+local feed = reflect.Class(Pet).methods["feed"]
+nameType = name.type.referent.name
+ageDefault = age.defaultValue
+returnType = feed.returnType.referent.name
+parameterType = feed.parameters["amount"].type.referent.name
+"#,
+    );
+    assert_eq!(result["nameType"], json!("String"));
+    assert_eq!(result["ageDefault"], json!(1));
+    assert_eq!(result["returnType"], json!("String"));
+    assert_eq!(result["parameterType"], json!("Int"));
+}
+
+#[test]
+fn type_and_return_type_are_hidden_members() {
+    let result = with_snippet(
+        r#"
+local name = reflect.Class(Pet).properties["name"]
+hasType = name.type != null
+rendered = name.toMap().containsKey("type")
+"#,
+    );
+    assert_eq!(result["hasType"], json!(true));
+    assert_eq!(result["rendered"], json!(false));
+}
+
+#[test]
+fn a_class_that_names_itself_in_a_member_type_reflects() {
+    let result = eval(
+        r#"
+import "pkl:reflect"
+
+class Rec {
+  rec: Rec?
+}
+
+name = reflect.DeclaredType(reflect.Class(Rec)).referent.name
+"#,
+    );
+    assert_eq!(result["name"], json!("Rec"));
+}
+
+#[test]
+fn all_modifiers_follow_the_declaration_order_of_modifier() {
+    let result = eval(
+        r#"
+import "pkl:reflect"
+
+open class A {
+  fixed x: Int = 1
+}
+
+class B extends A {
+  hidden fixed x: Int = 2
+}
+
+modifiers = reflect.Class(B).allProperties["x"].allModifiers.toList()
+"#,
+    );
+    assert_eq!(result["modifiers"], json!(["hidden", "fixed"]));
+}
+
+#[test]
+fn an_object_answers_has_property_and_get_property() {
+    let result = eval(
+        r#"
+local obj = new Dynamic { a = 1 }
+has = obj.hasProperty("a")
+hasNot = obj.hasProperty("b")
+get = obj.getProperty("a")
+orNull = obj.getPropertyOrNull("b")
+"#,
+    );
+    assert_eq!(result["has"], json!(true));
+    assert_eq!(result["hasNot"], json!(false));
+    assert_eq!(result["get"], json!(1));
+    assert_eq!(result["orNull"], json!(null));
 }

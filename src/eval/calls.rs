@@ -431,6 +431,20 @@ impl Evaluator {
             }
             return Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?));
         }
+        if let Value::Object(map, _) = obj
+            && let "hasProperty" | "getPropertyOrNull" | "getProperty" = method
+            && let [Value::String(name)] = evaled_args
+        {
+            let found = map.get(&**name).cloned();
+            return match (method, found) {
+                ("hasProperty", found) => Ok(Some(Value::Bool(found.is_some()))),
+                ("getPropertyOrNull", found) => Ok(Some(found.unwrap_or(Value::Null))),
+                (_, Some(value)) => Ok(Some(value)),
+                (_, None) => Err(Error::Eval(format!(
+                    "Cannot find property `{name}` in object of type `Dynamic`."
+                ))),
+            };
+        }
         Ok(None)
     }
 

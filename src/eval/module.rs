@@ -27,6 +27,9 @@ struct ModuleMembers<'b> {
     failed: HashMap<&'b str, String>,
 }
 
+/// What a union property without a selected default fails with.
+const NO_SELECTED_DEFAULT: &str = "has no selected default";
+
 impl Evaluator {
     /// The `module` binding's value, which has no source of its own, carrying
     /// the module's class so `module.getClass()` can name it. A scope that
@@ -888,7 +891,7 @@ impl Evaluator {
                 break;
             }
         }
-        self.run_late_binding_passes(
+        let deferred_failures = self.run_late_binding_passes(
             module,
             depth,
             &mut scope,
@@ -964,6 +967,9 @@ impl Evaluator {
             // plain property is not, even when the property has no value.
             let mut inherited_type_failures =
                 self.inherited_type_failures(body, &scope, &synthesized_inherited_types, depth)?;
+            for (name, message) in deferred_failures {
+                inherited_type_failures.entry(name).or_insert(message);
+            }
             if !late_inherited_properties.is_empty() {
                 self.plain_override_type_failures(
                     body,
@@ -1469,7 +1475,10 @@ impl Evaluator {
         requested_eval_fields: &Option<HashSet<Name>>,
         requested_output_fields: &Option<HashSet<Name>>,
         synthesized_inherited_types: &HashSet<&str>,
-    ) -> Result<()> {
+    ) -> Result<IndexMap<Name, String>> {
+        // A union property with no selected default fails only when read, so
+        // it is handed back to poison the member rather than fail the module.
+        let mut deferred = IndexMap::new();
         let late_passes = late_inherited_properties.len() + late_child_properties.len();
         // `super` in a base module's property is that module's own base, not
         // this module's: those keep the value the base computed.
@@ -1567,6 +1576,9 @@ impl Evaluator {
                     {
                         errored = true;
                     }
+                    Err(Error::Eval(message)) if message.ends_with(NO_SELECTED_DEFAULT) => {
+                        deferred.insert(prop.name.clone(), message);
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -1637,6 +1649,9 @@ impl Evaluator {
                     {
                         errored = true;
                     }
+                    Err(Error::Eval(message)) if message.ends_with(NO_SELECTED_DEFAULT) => {
+                        deferred.insert(prop.name.clone(), message);
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -1666,7 +1681,7 @@ impl Evaluator {
                 break;
             }
         }
-        Ok(())
+        Ok(deferred)
     }
 
     /// Evaluate locals, classes, type aliases and properties in dependency
