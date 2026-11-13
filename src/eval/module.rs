@@ -1143,7 +1143,7 @@ impl Evaluator {
             let names = referenced_roots(&instances);
             let captured = if names
                 .iter()
-                .any(|name| matches!(&**name, "this" | "module" | "super"))
+                .any(|name| matches!(&**name, "this" | "module" | "super" | "outer"))
             {
                 super::scope::capture_scope(&scope)
             } else {
