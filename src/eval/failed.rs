@@ -105,6 +105,49 @@ fn is_lazy_generic(ty: &crate::parser::TypeExpr) -> bool {
         if matches!(name.trim_start_matches('*'), "Listing" | "Mapping"))
 }
 
+pub(super) fn is_empty_collection(value: &Value) -> bool {
+    match value {
+        Value::List(items) => items.is_empty(),
+        Value::Object(map, _) => map.is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether `value` is plainly a collection of the class `name`.
+fn plainly_of_kind(name: &str, value: &Value) -> bool {
+    match (name, value) {
+        ("Listing", Value::List(items)) => items.kind() == ListKind::Listing,
+        ("List", Value::List(items)) => {
+            items.kind() == ListKind::List && !items.is_int_seq() && !items.is_bytes()
+        }
+        ("Mapping", Value::Object(_, Some(source))) => source.kind == ObjectKind::Mapping,
+        _ => false,
+    }
+}
+
+/// Whether `value` is plainly of the primitive type `ty`, without a check.
+fn plainly_of_type(value: &Value, ty: &crate::parser::TypeExpr) -> bool {
+    let crate::parser::TypeExpr::Named(name) = ty else {
+        return false;
+    };
+    matches!(
+        (name.as_str(), value),
+        ("String", Value::String(_))
+            | ("Int", Value::Int(_))
+            | ("Boolean", Value::Bool(_))
+            | ("Float", Value::Float(_))
+    )
+}
+
+/// Whether two values are one collection, sharing their storage.
+pub(super) fn same_storage(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::List(a), Value::List(b)) => a.same_items(b),
+        (Value::Object(a, _), Value::Object(b, _)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
 /// The first failed member anywhere inside `value`.
 fn deep_failed(value: &Value, depth: usize) -> Option<&Arc<str>> {
     if depth > 64 {
@@ -122,6 +165,26 @@ fn deep_failed(value: &Value, depth: usize) -> Option<&Arc<str>> {
 }
 
 impl Evaluator {
+    /// The error of the member `obj[key]` names, when it failed.
+    pub(super) fn raise_failed_at(&self, obj: &Value, key: &Value) -> Result<()> {
+        let member = match (obj, key) {
+            (Value::List(items), Value::Int(index)) => usize::try_from(*index)
+                .ok()
+                .and_then(|index| items.get(index)),
+            (Value::Object(map, _), key) => crate::value::mapping_storage_key(key)
+                .and_then(|stored| map.get(&*stored))
+                .or_else(|| match key {
+                    Value::String(name) => map.get(name.as_ref()),
+                    _ => None,
+                }),
+            _ => None,
+        };
+        match member {
+            Some(Value::Failed(message)) => Err(Error::Eval(message.to_string())),
+            _ => Ok(()),
+        }
+    }
+
     /// Whether a member of `value` failed.
     pub(super) fn holds_failed(&self, value: &Value) -> bool {
         self.failed_seen && deep_failed(value, 0).is_some()
@@ -190,6 +253,10 @@ impl Evaluator {
             }
             TypeExpr::Generic(name, args) => {
                 let name = name.trim_start_matches('*');
+                // An empty collection of the right kind has no member to check.
+                if is_empty_collection(&val) && plainly_of_kind(name, &val) {
+                    return Ok(val);
+                }
                 self.coerce_generic(val, ty, name, args, scope, depth)
             }
             _ => {
@@ -215,7 +282,9 @@ impl Evaluator {
         };
         // The collection itself must be of the right kind before its members
         // are looked at.
-        self.check_declared_value(&val, &TypeExpr::Named(name.to_string()), scope, depth)?;
+        if !plainly_of_kind(name, &val) {
+            self.check_declared_value(&val, &TypeExpr::Named(name.to_string()), scope, depth)?;
+        }
         match (name, val) {
             ("List" | "Listing" | "Set" | "Collection", Value::List(items)) => {
                 let Some(element_ty) = usable(args.first(), scope) else {
@@ -231,6 +300,40 @@ impl Evaluator {
                     return Ok(Value::List(items));
                 }
                 let lazy_members = name == "Listing";
+                // A flat element type leaves a member as it is or fails it,
+                // so the list is rebuilt only for a member that fails.
+                if !type_holds_lazy(&element_ty) {
+                    let mut coerced: Option<Vec<Value>> = None;
+                    for (index, item) in items.iter().enumerate() {
+                        if matches!(item, Value::Failed(_)) && lazy_members {
+                            continue;
+                        }
+                        if plainly_of_type(item, &element_ty) {
+                            continue;
+                        }
+                        let result = self.check_declared_value(item, &element_ty, scope, depth);
+                        let failure = match result {
+                            Ok(()) => continue,
+                            Err(error) if lazy_members => {
+                                match self.defer_member_error(Err(error))? {
+                                    failed @ Value::Failed(_) => failed,
+                                    _ => continue,
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        coerced.get_or_insert_with(|| items.iter().cloned().collect())[index] =
+                            failure;
+                    }
+                    return Ok(match coerced {
+                        None => Value::List(items),
+                        Some(coerced) => Value::List(
+                            ListValue::new(kind, coerced)
+                                .with_elem_class(items.elem_class().cloned())
+                                .with_layers(items.layers().cloned()),
+                        ),
+                    });
+                }
                 let mut coerced = Vec::with_capacity(items.len());
                 for item in items.iter() {
                     if matches!(item, Value::Failed(_)) && lazy_members {
@@ -274,30 +377,55 @@ impl Evaluator {
                     return Ok(Value::Object(entries, source));
                 }
                 let lazy_members = name == "Mapping";
-                let mut rebuilt = Arc::unwrap_or_clone(entries);
-                let stored: Vec<_> = rebuilt.keys().cloned().collect();
-                for stored_key in stored {
+                let mut failures: Vec<(Arc<str>, Value)> = Vec::new();
+                let mut rebuilt: Option<ObjectMap> = None;
+                for (stored_key, slot) in entries.iter() {
                     if let Some(key_ty) = &key_ty {
-                        let key = self.entry_key_value(&stored_key);
+                        let key = self.entry_key_value(stored_key);
                         self.check_declared_value(&key, key_ty, scope, depth)?;
                         if name == "Map" {
                             self.raise_deep_failed(&key)?;
                         }
                     }
-                    if let Some(value_ty) = &value_ty
-                        && let Some(slot) = rebuilt.get(&stored_key).cloned()
-                    {
-                        if matches!(slot, Value::Failed(_)) && lazy_members {
+                    let Some(value_ty) = &value_ty else {
+                        continue;
+                    };
+                    if matches!(slot, Value::Failed(_)) && lazy_members {
+                        continue;
+                    }
+                    if !type_holds_lazy(value_ty) {
+                        if plainly_of_type(slot, value_ty) {
                             continue;
                         }
-                        let result = self.coerce_lazy(slot, value_ty, scope, depth);
-                        let value = if lazy_members {
-                            self.defer_member_error(result)?
-                        } else {
-                            result?
-                        };
-                        rebuilt.insert(stored_key, value);
+                        match self.check_declared_value(slot, value_ty, scope, depth) {
+                            Ok(()) => {}
+                            Err(error) if lazy_members => {
+                                if let failed @ Value::Failed(_) =
+                                    self.defer_member_error(Err(error))?
+                                {
+                                    failures.push((stored_key.clone(), failed));
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        }
+                        continue;
                     }
+                    let result = self.coerce_lazy(slot.clone(), value_ty, scope, depth);
+                    let value = if lazy_members {
+                        self.defer_member_error(result)?
+                    } else {
+                        result?
+                    };
+                    rebuilt
+                        .get_or_insert_with(|| (*entries).clone())
+                        .insert(stored_key.clone(), value);
+                }
+                if rebuilt.is_none() && failures.is_empty() {
+                    return Ok(Value::Object(entries, source));
+                }
+                let mut rebuilt = rebuilt.unwrap_or_else(|| (*entries).clone());
+                for (key, failed) in failures {
+                    rebuilt.insert(key, failed);
                 }
                 Ok(Value::Object(Arc::new(rebuilt), source))
             }

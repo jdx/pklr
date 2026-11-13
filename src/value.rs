@@ -526,6 +526,11 @@ impl PartialEq for ListValue {
 }
 
 impl ListValue {
+    /// Whether both lists share their items.
+    pub(crate) fn same_items(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.items, &other.items)
+    }
+
     pub fn new(kind: ListKind, items: impl Into<Arc<Vec<Value>>>) -> Self {
         ListValue {
             items: items.into(),

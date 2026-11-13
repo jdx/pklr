@@ -15,21 +15,12 @@ impl Evaluator {
         self.eval_expr_boxed(expr, scope, depth)
     }
 
-    #[inline(always)]
     pub(super) fn eval_expr_boxed(
         &mut self,
         expr: &Expr,
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        match self.eval_expr_member(expr, scope, depth)? {
-            // A read of a `Listing` element or `Mapping` value that failed.
-            Value::Failed(message) => Err(Error::Eval(message.to_string())),
-            value => Ok(value),
-        }
-    }
-
-    fn eval_expr_member(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth > self.max_depth || crate::stack::exhausted() {
             crate::stack::limit_hit();
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
@@ -688,6 +679,9 @@ impl Evaluator {
                 }
                 let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
                 let key = self.eval_expr(key_expr, scope, depth + 1)?;
+                if self.failed_seen {
+                    self.raise_failed_at(&obj, &key)?;
+                }
                 if let Some(result) = stdlib::index(&obj, &key) {
                     return result;
                 }
@@ -1281,7 +1275,8 @@ pub(super) fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
 /// The key/value pairs a for-generator iterates over.
 pub(super) fn collection_to_items(v: Value) -> Result<Vec<(Value, Value)>> {
     check_iterable(&v)?;
-    Ok(match v {
+    // A loop reads every member, so one that failed raises its error.
+    let items: Vec<(Value, Value)> = match v {
         Value::List(items) => items
             .iter()
             .cloned()
@@ -1293,7 +1288,13 @@ pub(super) fn collection_to_items(v: Value) -> Result<Vec<(Value, Value)>> {
             .map(|(k, v)| (Value::String(k.clone()), v.clone()))
             .collect(),
         _ => vec![],
-    })
+    };
+    for (_, member) in &items {
+        if let Value::Failed(message) = member {
+            return Err(Error::Eval(message.to_string()));
+        }
+    }
+    Ok(items)
 }
 
 /// A value's type as pkl names it in error messages: `module#Class` for a

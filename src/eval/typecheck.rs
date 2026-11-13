@@ -370,6 +370,12 @@ impl Evaluator {
         }
         // The members of a `Listing` or `Mapping` are checked as they are
         // read: a value whose members alone fail is a good value here.
+        if let Some((coerced, coerced_ty)) = &self.last_coerced
+            && *coerced_ty == ty as *const _ as usize
+            && super::failed::same_storage(coerced, value)
+        {
+            return Ok(());
+        }
         if super::failed::type_holds_lazy(ty)
             && self
                 .coerce_lazy(value.clone(), ty, scope, depth + 1)

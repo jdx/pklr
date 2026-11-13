@@ -120,6 +120,9 @@ pub struct Evaluator {
     /// Whether any [`Value::Failed`] member was made, so reads that look for
     /// failed members can be skipped until one exists.
     failed_seen: bool,
+    /// The last declared property value whose members were coerced, with its
+    /// type: the declaration's own check need not walk it again.
+    last_coerced: Option<(Value, usize)>,
     /// Nonzero while a constraint predicate runs: its parameter checks are
     /// eager, as in pkl.
     eager_param_checks: u32,

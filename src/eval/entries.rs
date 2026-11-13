@@ -94,10 +94,12 @@ impl Evaluator {
             // they are read. A value of the wrong kind is left for the
             // declaration's own check to report.
             if let Some(ty) = &prop.type_ann
+                && !super::failed::is_empty_collection(&value)
                 && super::failed::type_holds_lazy(ty)
                 && type_is_runtime_checkable(ty, scope)
                 && let Ok(coerced) = self.coerce_lazy(value.clone(), ty, scope, depth)
             {
+                self.last_coerced = Some((coerced.clone(), ty as *const _ as usize));
                 value = coerced;
             }
             return Ok(Some(value));

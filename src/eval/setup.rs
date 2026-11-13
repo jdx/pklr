@@ -103,6 +103,7 @@ impl Evaluator {
             deferred_const: HashMap::default(),
             leaked_this: None,
             failed_seen: false,
+            last_coerced: None,
             eager_param_checks: 0,
             placeholder_reads: 0,
             narrowed_import_cache: HashMap::default(),
