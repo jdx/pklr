@@ -2262,3 +2262,26 @@ fn body_only_declarations_accumulate_across_the_amends_chain() {
         "a = 2\no {\n  \"base\"\n  2\n}\n"
     );
 }
+
+// Classes of the same name in different modules, such as `json.Property` and
+// `yaml.Property`, are different classes: a converter keyed by one does not
+// apply to the other's instances, while one keyed by a parent still reaches
+// its subclasses.
+#[cfg(feature = "native-io")]
+#[test]
+fn class_converters_tell_same_named_classes_apart() {
+    let dir = TestTempDir::new("pklr_converter_same_name");
+    std::fs::write(dir.path().join("ma.pkl"), "open class Foo { x: Int = 1 }\n").unwrap();
+    std::fs::write(dir.path().join("mb.pkl"), "class Foo { x: Int = 2 }\n").unwrap();
+    std::fs::write(
+        dir.path().join("main.pkl"),
+        "import \"ma.pkl\"\nimport \"mb.pkl\"\nclass Sub extends ma.Foo {}\n\
+         a = new ma.Foo {}\nb = new mb.Foo {}\ns = new Sub {}\n\
+         output { renderer = new JsonRenderer { converters { [ma.Foo] = (_) -> \"A\" } } }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.path().join("main.pkl")).unwrap(),
+        serde_json::json!({"a": "A", "b": {"x": 2}, "s": "A"})
+    );
+}

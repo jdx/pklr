@@ -39,9 +39,29 @@ pub(crate) fn class_key(name: &str) -> Arc<str> {
     format!("{CLASS_KEY_PREFIX}{name}").into()
 }
 
+/// Separates a class's name from its definition-site identity in a class key.
+const CLASS_IDENTITY_SEP: char = '\u{1}';
+
+/// The mapping key for the class `name` declared at `identity`: classes that
+/// share a name, such as `json.Property` and `yaml.Property`, stay apart.
+pub(crate) fn class_key_with_identity(name: &str, identity: Option<&str>) -> Arc<str> {
+    match identity {
+        Some(identity) => format!("{CLASS_KEY_PREFIX}{name}{CLASS_IDENTITY_SEP}{identity}").into(),
+        None => class_key(name),
+    }
+}
+
 /// The class a mapping key made by [`class_key`] stands for.
 pub(crate) fn class_key_name(key: &str) -> Option<&str> {
-    key.strip_prefix(CLASS_KEY_PREFIX)
+    let key = key.strip_prefix(CLASS_KEY_PREFIX)?;
+    Some(key.split(CLASS_IDENTITY_SEP).next().unwrap_or(key))
+}
+
+/// The definition-site identity of the class a key stands for, if it has one.
+fn class_key_identity(key: &str) -> Option<&str> {
+    key.strip_prefix(CLASS_KEY_PREFIX)?
+        .split_once(CLASS_IDENTITY_SEP)
+        .map(|(_, identity)| identity)
 }
 
 /// Prefix of a mapping key that stands for a `RenderDirective`.
@@ -594,7 +614,9 @@ fn parse_path_spec(spec: &str) -> Result<Vec<PathSpec>> {
 /// rendered, keyed by class or by path.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Converters {
-    by_class: Vec<(String, Value)>,
+    /// Each converter's class name, its definition-site identity if known,
+    /// and the function.
+    by_class: Vec<(String, Option<String>, Value)>,
     by_path: Vec<(Vec<PathSpec>, Value)>,
 }
 
@@ -611,7 +633,11 @@ impl Converters {
                 continue;
             }
             match class_key_name(key) {
-                Some(class) => result.by_class.push((class.to_string(), function.clone())),
+                Some(class) => result.by_class.push((
+                    class.to_string(),
+                    class_key_identity(key).map(str::to_string),
+                    function.clone(),
+                )),
                 None => result
                     .by_path
                     .push((parse_path_spec(key)?, function.clone())),
@@ -631,8 +657,8 @@ impl Converters {
     pub(crate) fn class(&self, name: &str) -> Option<&Value> {
         self.by_class
             .iter()
-            .find(|(class, _)| class == name)
-            .map(|(_, function)| function)
+            .find(|(class, ..)| class == name)
+            .map(|(.., function)| function)
     }
 
     /// The converter for `value` at `path` (innermost segment last): a
@@ -694,16 +720,32 @@ impl Converters {
                 source
                     .into_iter()
                     .flat_map(|source| {
+                        // Each class in the chain, nearest first, with the
+                        // identity of its declaration where one is known.
                         source
                             .type_name
                             .iter()
-                            .chain(source.parent_type_names.iter())
+                            .map(|name| (name, source.type_identity.as_deref()))
+                            .chain(source.parent_type_names.iter().enumerate().map(
+                                |(index, name)| {
+                                    (
+                                        name,
+                                        source
+                                            .parent_type_identities
+                                            .get(index)
+                                            .map(String::as_str),
+                                    )
+                                },
+                            ))
                     })
-                    .find_map(|name| {
+                    .find_map(|(name, identity)| {
                         self.by_class
                             .iter()
-                            .find(|(class, _)| type_names_match(class, name))
-                            .map(|(_, function)| function)
+                            .find(|(class, declared, _)| match (declared, identity) {
+                                (Some(declared), Some(identity)) => declared == identity,
+                                _ => type_names_match(class, name),
+                            })
+                            .map(|(.., function)| function)
                     })
                     .or_else(|| {
                         ["Typed", "Object", "Any"]

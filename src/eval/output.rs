@@ -365,7 +365,9 @@ impl Evaluator {
                     .as_deref()
                     .is_some_and(|name| name.rsplit('.').next() == Some(last)) =>
             {
-                source.type_name.as_deref().map(render::class_key)
+                source.type_name.as_deref().map(|name| {
+                    render::class_key_with_identity(name, source.type_identity.as_deref())
+                })
             }
             _ => None,
         }
