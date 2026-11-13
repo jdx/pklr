@@ -107,7 +107,7 @@ impl Evaluator {
         for (name, rendered) in members {
             let assigned = overlay
                 .iter()
-                .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == *name));
+                .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == *name && prop.value.is_some() && !has_modifier(&prop.modifiers, Modifier::Local)));
             if !assigned {
                 poisoned.insert(
                     name.clone(),
