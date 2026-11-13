@@ -1983,3 +1983,18 @@ result = new C { x = new Dynamic { 1 } }
     );
     assert_eq!(json["result"]["x"][0], 1);
 }
+
+#[test]
+fn cast_to_a_constrained_generic_names_the_element() {
+    let msg = eval_fails("x = List(\"a\") as List<Int>(isEmpty)");
+    assert!(msg.contains("type `Int`"), "{msg}");
+}
+
+#[test]
+fn mutually_recursive_generic_aliases_are_reported() {
+    let msg = eval_fails("typealias A<T> = B<T>\ntypealias B<T> = A<T>\nx: A<Int> = 1\n");
+    assert!(
+        msg.contains("cyclic") || msg.contains("refers to itself"),
+        "{msg}"
+    );
+}

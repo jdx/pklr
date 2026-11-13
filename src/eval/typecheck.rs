@@ -600,6 +600,15 @@ impl Evaluator {
                 return self.element_mismatch(inner, val, scope);
             }
             TypeExpr::Generic(name, args) => (name.trim_start_matches('*'), args),
+            // The base of a constrained type names the element, as for a
+            // declared property.
+            TypeExpr::Constrained(base, ..) => {
+                let base = crate::parser::parse_type_name(base).ok()?;
+                if matches!(base, TypeExpr::Constrained(..)) {
+                    return None;
+                }
+                return self.element_mismatch(&base, val, scope);
+            }
             _ => return None,
         };
         if !value_is_type(val, ty) {
@@ -1207,7 +1216,14 @@ impl Evaluator {
         let body = body.clone();
         // The parameters shadow aliases of the same name that are being
         // resolved outside, so the body starts with its own guard.
-        let mut inner_resolving = vec![key];
+        // Other applications still being checked stay in it, so generic
+        // aliases that refer to each other are reported.
+        let mut inner_resolving: Vec<String> = resolving
+            .iter()
+            .filter(|seen| seen.contains('<'))
+            .cloned()
+            .collect();
+        inner_resolving.push(key);
         self.eval_type_check_in(val, &body, &inner, depth + 1, &mut inner_resolving)
             .map(Some)
     }
