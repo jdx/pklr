@@ -810,7 +810,12 @@ impl Settings {
                 Some(Value::Object(map, _)) => Some((**map).clone()),
                 _ => None,
             },
-            renderer: renderer.clone(),
+            // Without an `output.renderer`, annotations see the renderer the
+            // format selects, as `pkl eval` renders with one.
+            renderer: match renderer_kind(renderer) {
+                Some(_) => renderer.clone(),
+                None => super::stdlib::typed_object(kind.class_name(), ObjectMap::default()),
+            },
             property_transformers: Converters::from_mapping(get("convertPropertyTransformers"))?,
         })
     }
@@ -1145,13 +1150,15 @@ pub(crate) trait StringRenderer<'a> {
                         if self.rejects_compound_keys()
                             && raw_key.starts_with(crate::value::MAPPING_KEY_PREFIX)
                             && is_non_string_key(raw_key)
-                            && matches!(
-                                key_value(raw_key),
-                                Value::String(_)
-                                    | Value::Object(..)
-                                    | Value::List(_)
-                                    | Value::Regex(_)
-                            )
+                            && match key_value(raw_key) {
+                                Value::String(_) => true,
+                                // A converter may have turned the key into a
+                                // string, which JSON accepts.
+                                Value::Object(..) | Value::List(_) | Value::Regex(_) => {
+                                    !matches!(key, Value::String(_))
+                                }
+                                _ => false,
+                            }
                         {
                             return Err(cannot_render_non_string_key(&key_value(raw_key), "JSON"));
                         }

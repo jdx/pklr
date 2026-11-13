@@ -95,13 +95,7 @@ impl Evaluator {
                     .flat_map(|method| &method.annotations);
                 declaration.annotations.iter().chain(methods)
             })
-            .map(|annotation| {
-                Entry::Elem(Expr::New(
-                    Some(annotation.name.clone()),
-                    Arc::new(annotation.body.clone()),
-                    Vec::new(),
-                ))
-            })
+            .map(|annotation| Entry::Elem(annotation_instance(annotation)))
             .chain(declarations.iter().flat_map(|declaration| {
                 // A bodyless method's types name imports its entries do not;
                 // a type test walks them as any other type.
@@ -549,11 +543,7 @@ impl Evaluator {
         for entry in module.body.iter() {
             if let Entry::Property(prop) = entry {
                 for annotation in &prop.annotations {
-                    analysis_entries.push(Entry::Elem(Expr::New(
-                        Some(annotation.name.clone()),
-                        Arc::new(annotation.body.clone()),
-                        Vec::new(),
-                    )));
+                    analysis_entries.push(Entry::Elem(annotation_instance(annotation)));
                 }
             }
         }
@@ -1602,25 +1592,31 @@ impl Evaluator {
         let can_stop = || settled_after() < late_passes;
         // The names a changed member of this module reaches: its own members,
         // and the inherited ones that read them, directly or through others.
-        let mut reaches_child: HashSet<Name> = child_property_names
-            .iter()
-            .map(|name| Name::from(&**name))
-            .collect();
-        loop {
-            let before = reaches_child.len();
-            for prop in late_inherited_properties {
-                if !reaches_child.contains(prop.name.as_ref())
-                    && property_reference_names(prop)
-                        .iter()
-                        .any(|name| reaches_child.contains(name))
-                {
-                    reaches_child.insert(prop.name.clone());
+        // Worked out only when a listing amendment needs it.
+        let reaches_child_cell: std::cell::OnceCell<HashSet<Name>> = std::cell::OnceCell::new();
+        let reaches_child = || {
+            reaches_child_cell.get_or_init(|| {
+                let mut reaches: HashSet<Name> = child_property_names
+                    .iter()
+                    .map(|name| Name::from(&**name))
+                    .collect();
+                loop {
+                    let before = reaches.len();
+                    for prop in late_inherited_properties {
+                        if !reaches.contains(prop.name.as_ref())
+                            && property_reference_names(prop)
+                                .iter()
+                                .any(|name| reaches.contains(name))
+                        {
+                            reaches.insert(prop.name.clone());
+                        }
+                    }
+                    if reaches.len() == before {
+                        break reaches;
+                    }
                 }
-            }
-            if reaches_child.len() == before {
-                break;
-            }
-        }
+            })
+        };
         let mut pass = 0;
         let mut quiet_passes = 0;
         loop {
@@ -1647,7 +1643,7 @@ impl Evaluator {
                 {
                     let reads = referenced_roots(body);
                     if !reads.iter().any(|name| {
-                        reaches_child.contains(name)
+                        reaches_child().contains(name)
                             || matches!(name.as_ref(), "this" | "module" | "super")
                     }) {
                         continue;

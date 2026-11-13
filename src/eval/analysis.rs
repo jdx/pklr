@@ -80,10 +80,13 @@ fn index_reads_key(alias: &str) -> String {
     format!("{alias}\0[]")
 }
 
-/// The instance an annotation writes, for what it names and reads.
-fn annotation_instance(annotation: &crate::parser::Annotation) -> Expr {
+/// The instance an annotation writes, for what it names and reads. A dotted
+/// annotation class names only its root, so an import it comes from is read
+/// whole, as the module that declares the annotation is evaluated whole.
+pub(super) fn annotation_instance(annotation: &crate::parser::Annotation) -> Expr {
+    let root = annotation.name.split('.').next().unwrap_or_default();
     Expr::New(
-        Some(annotation.name.clone()),
+        Some(root.to_string()),
         Arc::new(annotation.body.clone()),
         Vec::new(),
     )

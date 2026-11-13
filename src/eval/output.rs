@@ -864,18 +864,12 @@ impl Evaluator {
         // omitted unless the evaluated renderer sets `omitNullProperties`
         // to false.
         let settings = render::Settings::read(kind, &renderer)?;
-        // Without an `output.renderer`, `pkl eval -f json` renders with a
-        // `JsonRenderer`, which is what annotations see.
-        let annotation_renderer = match render::renderer_kind(&settings.renderer) {
-            Some(_) => settings.renderer.clone(),
-            None => super::stdlib::typed_object("JsonRenderer", ObjectMap::default()),
-        };
         render::to_json(
             &value,
             top_kind,
             &converters,
             settings.omit_null_properties,
-            Some((&annotation_renderer, &settings.property_transformers)),
+            Some((&settings.renderer, &settings.property_transformers)),
             &mut Invoker(self, 0),
         )
     }

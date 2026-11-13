@@ -264,7 +264,10 @@ impl Evaluator {
                                         let annotations: Vec<_> = p
                                             .annotations
                                             .iter()
-                                            .filter(|annotation| annotation.name != "Deprecated")
+                                            .filter(|annotation| {
+                                                !super::module::STDLIB_ANNOTATIONS
+                                                    .contains(&&*annotation.name)
+                                            })
                                             .cloned()
                                             .collect();
                                         (!annotations.is_empty())

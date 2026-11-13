@@ -2151,6 +2151,48 @@ res = new JsonRenderer {}.renderValue(new C {})"#,
 }
 
 #[test]
+fn stdlib_annotations_on_an_overridden_property_are_not_evaluated() {
+    let json = eval(
+        r#"open class Parent {
+  @Since { version = throw("boom") }
+  a: Int = 1
+}
+class Child extends Parent {
+  a: Int = 2
+}
+res = new JsonRenderer {}.renderValue(new Child {})"#,
+    );
+    assert_eq!(json["res"], "{\n  \"a\": 2\n}");
+}
+
+#[test]
+fn json_compound_key_converted_to_a_string_renders() {
+    let json = eval(
+        r#"res = new JsonRenderer { converters { [List] = (key) -> "items" } }
+  .renderValue(new Mapping { [List(1)] = 2 })"#,
+    );
+    assert_eq!(json["res"], "{\n  \"items\": 2\n}");
+    let (_dir, path) = module_file(
+        "pklr_render_json_converted_compound_key",
+        "output {\n  renderer = new JsonRenderer { converters { [List] = (key) -> \"items\" } }\n  value = new Mapping { [List(1)] = 2 }\n}\n",
+    );
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"items": 2})
+    );
+}
+
+#[test]
+fn text_annotation_without_an_output_renderer_sees_a_pcf_renderer() {
+    let (_dir, path) = module_file(
+        "pklr_render_text_default_renderer_annotation",
+        "class Tag extends ConvertProperty {\n  render = (prop, r) -> Pair(\"\\(r.getClass().simpleName)_\\(prop.first)\", prop.second)\n}\nclass C {\n  @Tag {}\n  a: Int = 1\n}\nres = new C {}\n",
+    );
+    let text = pklr::eval_to_text(&path).unwrap();
+    assert_eq!(text, "res {\n  PcfRenderer_a = 1\n}\n");
+}
+
+#[test]
 fn amended_instance_keeps_the_annotations_of_its_class() {
     let json = eval(
         r#"import "pkl:json"

@@ -33,7 +33,13 @@ thread_local! {
 
 /// Forgets the values remembered for compound mapping keys.
 pub(crate) fn clear_compound_keys() {
-    COMPOUND_KEYS.with(|keys| keys.borrow_mut().clear());
+    drop(take_compound_keys());
+}
+
+/// The values remembered for compound mapping keys, for the caller to free:
+/// a key can nest deeply, so freeing it may need a large stack.
+pub(crate) fn take_compound_keys() -> rustc_hash::FxHashMap<Arc<str>, Value> {
+    COMPOUND_KEYS.with(|keys| std::mem::take(&mut *keys.borrow_mut()))
 }
 
 pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
@@ -1561,6 +1567,20 @@ impl From<serde_json::Value> for Value {
                 Value::Object(Arc::new(map), None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod compound_key_tests {
+    use super::*;
+
+    #[test]
+    fn taking_the_compound_keys_empties_the_table() {
+        let key = Value::List(ListValue::new(ListKind::List, vec![Value::Int(1)]));
+        let storage = mapping_storage_key(&key).expect("a list is a compound key");
+        let taken = take_compound_keys();
+        assert!(taken.contains_key(&storage));
+        assert!(take_compound_keys().is_empty());
     }
 }
 

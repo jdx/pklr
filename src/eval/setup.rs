@@ -435,6 +435,7 @@ impl Evaluator {
             std::mem::take(&mut self.refs),
             std::mem::take(&mut self.module_declarations),
             std::mem::take(&mut self.parsed_declarations),
+            crate::value::take_compound_keys(),
         );
         crate::stack::drop_on_large_stack(held);
     }
@@ -443,5 +444,8 @@ impl Evaluator {
 impl Drop for Evaluator {
     fn drop(&mut self) {
         self.release_deep_state();
+        // Whatever the evaluation left that was not deep enough to need a
+        // large stack to free.
+        crate::value::clear_compound_keys();
     }
 }
