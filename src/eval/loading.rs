@@ -759,10 +759,11 @@ impl Evaluator {
             }
             // A remote base is not followed here; assume it may reach the
             // standard library rather than reject members it might declare.
-            if uri.contains("://") {
+            let local = uri.starts_with("file:") || uri.starts_with("modulepath:");
+            if uri.contains("://") && !local {
                 return true;
             }
-            let Ok(base_path) = self.resolve_local_path(&from, &uri) else {
+            let Ok(base_path) = self.local_file_path(&from, &uri) else {
                 return false;
             };
             let Ok(base) = self.parse_file(&base_path) else {

@@ -8221,3 +8221,16 @@ fn map_spread_into_listing_is_rejected() {
     let e = eval_fails("x = new Listing { ...Map(1, 2) }");
     assert!(e.contains("Cannot spread"), "{e}");
 }
+
+#[test]
+fn file_uri_base_rejects_undeclared_properties() {
+    let dir = std::env::temp_dir().join(format!("pklr_amend_fileuri_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("base.pkl"), "a = 1\n").unwrap();
+    let uri = format!("file://{}", dir.join("base.pkl").display());
+    std::fs::write(dir.join("child.pkl"), format!("amends \"{uri}\"\nb = 2\n")).unwrap();
+    let r = pklr::eval_to_json(&dir.join("child.pkl"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(msg.contains("Cannot find property `b`"), "{msg}");
+}
