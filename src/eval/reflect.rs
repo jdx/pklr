@@ -245,6 +245,49 @@ impl Evaluator {
         Ok(mirror("Class", members))
     }
 
+    /// The annotations of the property `name` of an instance of the class
+    /// `source` describes, evaluated where the class was declared.
+    pub(super) fn property_annotation_values(
+        &mut self,
+        source: &ObjectSource,
+        name: &str,
+        depth: usize,
+    ) -> Result<Vec<Value>> {
+        let mut annotations = Vec::new();
+        if let Some(module) = &source.module_annotations {
+            let scope = super::scope::restore_scope(&module.scope);
+            for (_, list) in module.properties.iter().filter(|(n, _)| &**n == name) {
+                for annotation in list {
+                    let expr = Expr::New(
+                        Some(annotation.name.clone()),
+                        Arc::new(annotation.body.clone()),
+                        Vec::new(),
+                    );
+                    annotations.push(self.eval_expr(&expr, &scope, depth + 1)?);
+                }
+            }
+            return Ok(annotations);
+        }
+        let scope = definition_type_scope(source);
+        for entry in source.entries.iter() {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            if &*prop.name != name {
+                continue;
+            }
+            for annotation in &prop.annotations {
+                let expr = Expr::New(
+                    Some(annotation.name.clone()),
+                    Arc::new(annotation.body.clone()),
+                    Vec::new(),
+                );
+                annotations.push(self.eval_expr(&expr, &scope, depth + 1)?);
+            }
+        }
+        Ok(annotations)
+    }
+
     /// The mirror of a property or method.
     fn member_mirror(&mut self, prop: &Property, scope: &Scope, depth: usize) -> Result<Value> {
         let mut annotations = Vec::with_capacity(prop.annotations.len());

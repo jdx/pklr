@@ -463,6 +463,17 @@ impl Evaluator {
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
         let mut referenced_imports = referenced_roots(&analysis_entries);
         referenced_imports.extend(inherited_references);
+        // A renderer applies the annotations of the module's own properties,
+        // whether or not the requested fields reach those properties.
+        for entry in module.body.iter() {
+            if let Entry::Property(prop) = entry {
+                for annotation in &prop.annotations {
+                    if let Some(root) = annotation.name.split('.').next() {
+                        referenced_imports.insert(nm(root));
+                    }
+                }
+            }
+        }
         let import_field_uses = import_field_uses(&analysis_entries);
 
         let mut inherited_local_paths: Vec<PathBuf> = Vec::new();
@@ -1018,7 +1029,45 @@ impl Evaluator {
         // An abstract module also keeps a source, so `new` can reject it.
         let deprecated = collect_deprecated(body);
         let is_abstract = module_is_abstract(module);
-        let source = if deprecated.is_empty() && poisoned_members.is_empty() && !is_abstract {
+        // Properties annotated with a user annotation, which a renderer's
+        // `convertPropertyTransformers` may convert.
+        let annotated: Vec<(Arc<str>, Vec<crate::parser::Annotation>)> = body
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                    let annotations: Vec<_> = prop
+                        .annotations
+                        .iter()
+                        .filter(|annotation| {
+                            ![
+                                "Deprecated",
+                                "Since",
+                                "AlsoKnownAs",
+                                "Unlisted",
+                                "DocExample",
+                                "SourceCode",
+                                "ModuleInfo",
+                            ]
+                            .contains(&&*annotation.name)
+                        })
+                        .cloned()
+                        .collect();
+                    (!annotations.is_empty()).then(|| (prop.name.clone(), annotations))
+                }
+                _ => None,
+            })
+            .collect();
+        let module_annotations = (!annotated.is_empty()).then(|| {
+            Arc::new(crate::value::ModuleAnnotations {
+                properties: annotated,
+                scope: super::scope::capture_scope(&scope),
+            })
+        });
+        let source = if deprecated.is_empty()
+            && poisoned_members.is_empty()
+            && !is_abstract
+            && module_annotations.is_none()
+        {
             None
         } else {
             Some(Arc::new(ObjectSource {
@@ -1040,6 +1089,7 @@ impl Evaluator {
                 declared_as: None,
                 poisoned_members: (!poisoned_members.is_empty())
                     .then(|| Arc::new(poisoned_members)),
+                module_annotations,
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
                 is_module: true,
@@ -2791,6 +2841,7 @@ fn module_binding_source(name: &str, namespace: &str) -> Arc<ObjectSource> {
         deprecated: IndexMap::new(),
         declared_as: None,
         poisoned_members: None,
+        module_annotations: None,
         kind: ObjectKind::Object,
         is_parsed_json: false,
         is_module: true,

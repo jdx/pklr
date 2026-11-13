@@ -480,6 +480,7 @@ pub(super) fn mapping_source() -> ObjectSource {
         mapping_value_types: Vec::new(),
         deprecated: IndexMap::new(),
         poisoned_members: None,
+        module_annotations: None,
         declared_as: None,
         kind: ObjectKind::Mapping,
         is_parsed_json: false,
@@ -1064,12 +1065,17 @@ impl Evaluator {
                         )));
                     }
                     // `new { ... }` for a `Mixin` value is a mixin, not an object.
-                    if let Expr::New(None, body, params) = val_expr
+                    let mixin_body = match val_expr {
+                        Expr::New(None, body, params) => Some((body, params.clone())),
+                        Expr::ObjectBody(body) => Some((body, Vec::new())),
+                        _ => None,
+                    };
+                    if let Some((body, params)) = mixin_body
                         && expanded_value_type_names.iter().any(|name| {
                             selected_value_type(name) && mapping_value_type_base(name) == "Mixin"
                         })
                     {
-                        let mixin = Expr::New(Some("Mixin".into()), body.clone(), params.clone());
+                        let mixin = Expr::New(Some("Mixin".into()), body.clone(), params);
                         let val = self.eval_expr(&mixin, entry_scope, depth + 1)?;
                         map.insert(storage_key, val.into_entry_value());
                         continue;
@@ -1229,6 +1235,7 @@ impl Evaluator {
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,
+                                        module_annotations: None,
                                         declared_as: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,

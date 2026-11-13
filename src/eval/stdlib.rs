@@ -60,6 +60,7 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         mapping_value_types: Vec::new(),
         deprecated: IndexMap::new(),
         poisoned_members: None,
+        module_annotations: None,
         declared_as: None,
         kind: ObjectKind::Object,
         is_parsed_json: false,

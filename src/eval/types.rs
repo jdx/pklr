@@ -1520,6 +1520,15 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "DataSize" => matches!(val, Value::DataSize(_)),
             "Any" | "unknown" => true,
             "nothing" => false,
+            // A renderer is an instance of its own class only.
+            name @ ("PcfRenderer" | "JsonRenderer" | "YamlRenderer" | "PListRenderer"
+            | "PropertiesRenderer")
+                if matches!(val, Value::Object(_, Some(source)) if source.type_name.is_some()) =>
+            {
+                matches!(val, Value::Object(_, Some(source))
+                    if source.type_name.as_deref() == Some(name)
+                        || source.parent_type_names.iter().any(|parent| parent == name))
+            }
             _ => {
                 // Unknown type name -- could be a class; treat objects as matching
                 matches!(val, Value::Object(..))

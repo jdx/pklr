@@ -1903,3 +1903,69 @@ fn pcf_renders_object_list_and_regex_mapping_keys_as_values() {
         "{\n  [Pair(1, \"a\")] = 1\n  [Regex(\"b+\")] = 2\n  [List(1, 2)] = 3\n}"
     );
 }
+
+#[cfg(feature = "native-io")]
+#[test]
+fn convert_property_annotations_apply_to_module_and_class_properties() {
+    let (_dir, path) = module_file(
+        "pklr_render_convert_property",
+        r#"import "pkl:json"
+
+class Comment extends ConvertProperty {
+  text: String
+  render = (prop, renderer) ->
+    Pair(prop.key, new RenderDirective {
+      text = (renderer as ValueRenderer).renderValue(prop.value) + " // " + outer.text
+    })
+}
+
+@json.Property { name = "FOO" }
+foo: String = "a"
+
+@Comment { text = "note" }
+bar: Int = 1
+
+nested: Nested
+
+class Nested {
+  @json.Property { name = "RENAMED" }
+  a: Int = 2
+  b: Int = 3
+}
+
+output { renderer = new PcfRenderer {} }
+"#,
+    );
+    assert_eq!(
+        pklr::eval_to_text(&path).unwrap(),
+        "foo = \"a\"\nbar 1 // note\nnested {\n  a = 2\n  b = 3\n}\n"
+    );
+    let (_dir, path) = module_file(
+        "pklr_render_convert_property_json",
+        "import \"pkl:json\"\n@json.Property { name = \"FOO\" }\nfoo: String = \"a\"\noutput { renderer = new JsonRenderer {} }\n",
+    );
+    assert_eq!(
+        pklr::eval_to_text(&path).unwrap(),
+        "{\n  \"FOO\": \"a\"\n}\n"
+    );
+}
+
+#[test]
+fn child_override_keeps_the_parent_property_position() {
+    assert_eq!(
+        render(
+            r#"new PcfRenderer {}.renderValue(new Bar {})
+open class Foo { a = 1; b = 2; c = 3 }
+class Bar extends Foo { b = 20 }"#
+        ),
+        "{\n  a = 1\n  b = 20\n  c = 3\n}"
+    );
+}
+
+#[test]
+fn renderer_is_checks_distinguish_renderer_classes() {
+    assert_eq!(
+        render(r#""\(new PcfRenderer {} is JsonRenderer) \(new PcfRenderer {} is PcfRenderer)""#),
+        "false true"
+    );
+}

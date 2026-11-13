@@ -326,6 +326,12 @@ pub(crate) struct CapturedScope {
 /// with the overlay's entries and re-evaluated so that dependent
 /// properties pick up overridden values.
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ModuleAnnotations {
+    pub properties: Vec<(Arc<str>, Vec<crate::parser::Annotation>)>,
+    pub scope: CapturedScope,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSource {
     pub(crate) entries: crate::parser::Body,
     /// The bindings visible where the object was defined (see
@@ -373,6 +379,10 @@ pub struct ObjectSource {
     /// instantiating such a member reports its error instead of treating it
     /// as absent, and rendering the module reports a failed output member.
     pub(crate) poisoned_members: Option<Arc<IndexMap<Arc<str>, PoisonedMember>>>,
+    /// The annotations on a module's own properties, with the module's scope,
+    /// so a renderer can apply `ConvertProperty` annotations. A module keeps
+    /// no entries; `None` unless some property carries such an annotation.
+    pub(crate) module_annotations: Option<Arc<ModuleAnnotations>>,
     /// For a class a module declares as a member, the name of that member (the
     /// class, or a type alias to it). A class held by another name, such as an
     /// ordinary property `c = lib.C`, is data and is not marked.
@@ -1756,6 +1766,7 @@ mod same_data_tests {
                         .collect(),
                 )
             }),
+            module_annotations: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
             is_module: false,

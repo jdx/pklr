@@ -187,7 +187,70 @@ impl Evaluator {
                                 _ => None,
                             })
                             .collect();
+                        let child_entries = std::mem::take(&mut src.entries);
+                        let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
+                        // An annotation on a property the parent declares also
+                        // applies to the child's override, ahead of its own.
+                        let inherited_annotations: Vec<(Name, Vec<crate::parser::Annotation>)> =
+                            psrc.entries
+                                .iter()
+                                .filter_map(|entry| match entry {
+                                    Entry::Property(p)
+                                        if !p.annotations.is_empty()
+                                            && child_names.contains(&p.name) =>
+                                    {
+                                        Some((p.name.clone(), p.annotations.clone()))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                        let mut prepared_child: Vec<(Entry, Option<Arc<CapturedScope>>)> =
+                            Vec::new();
+                        for (entry_index, entry) in
+                            Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
+                        {
+                            let entry = match entry {
+                                Entry::Property(prop)
+                                    if inherited_annotations
+                                        .iter()
+                                        .any(|(name, _)| *name == prop.name) =>
+                                {
+                                    let mut prop = Arc::unwrap_or_clone(prop);
+                                    let mut annotations: Vec<_> = inherited_annotations
+                                        .iter()
+                                        .filter(|(name, _)| *name == prop.name)
+                                        .flat_map(|(_, annotations)| annotations.iter())
+                                        .filter(|annotation| annotation.name != "Deprecated")
+                                        .cloned()
+                                        .collect();
+                                    annotations.append(&mut prop.annotations);
+                                    prop.annotations = annotations;
+                                    Entry::Property(Arc::new(prop))
+                                }
+                                entry => entry,
+                            };
+                            prepared_child.push((
+                                entry,
+                                child_entry_scopes.get(entry_index).cloned().unwrap_or(None),
+                            ));
+                        }
+                        let mut child_used = vec![false; prepared_child.len()];
                         for (entry_index, pe) in psrc.entries.iter().enumerate() {
+                            // A child's override keeps the parent member's place.
+                            if let Entry::Property(p) = pe
+                                && child_names.contains(&p.name)
+                                && !has_modifier(&p.modifiers, Modifier::Local)
+                                && let Some(ci) =
+                                    prepared_child.iter().enumerate().position(|(i, (e, _))| {
+                                        !child_used[i]
+                                            && matches!(e, Entry::Property(c) if c.name == p.name)
+                                    })
+                            {
+                                child_used[ci] = true;
+                                combined_entries.push(prepared_child[ci].0.clone());
+                                combined_entry_scopes.push(prepared_child[ci].1.clone());
+                                continue;
+                            }
                             if let Entry::Property(p) = pe
                                 && (!child_names.contains(&p.name)
                                     || has_modifier(&p.modifiers, Modifier::Local))
@@ -208,14 +271,11 @@ impl Evaluator {
                                 }
                             }
                         }
-                        let child_entries = std::mem::take(&mut src.entries);
-                        let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
-                        for (entry_index, entry) in
-                            Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
-                        {
-                            combined_entries.push(entry);
-                            combined_entry_scopes
-                                .push(child_entry_scopes.get(entry_index).cloned().unwrap_or(None));
+                        for (i, (entry, scope)) in prepared_child.into_iter().enumerate() {
+                            if !child_used[i] {
+                                combined_entries.push(entry);
+                                combined_entry_scopes.push(scope);
+                            }
                         }
                         combined_evaluated_properties.extend(src.evaluated_properties);
                         // Keep the ObjectSource invariant used by amendment

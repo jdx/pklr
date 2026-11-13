@@ -38,7 +38,7 @@ class PcfRenderer {
   omitNullProperties: Boolean = false
   useCustomStringDelimiters: Boolean = false
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 class JsonRenderer {
@@ -46,7 +46,7 @@ class JsonRenderer {
   indent: String = "  "
   omitNullProperties: Boolean = true
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 class YamlRenderer {
@@ -56,14 +56,14 @@ class YamlRenderer {
   omitNullProperties: Boolean = true
   isStream: Boolean = false
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 class PListRenderer {
   extension = "plist"
   indent: String = "  "
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 class PropertiesRenderer {
@@ -71,7 +71,7 @@ class PropertiesRenderer {
   omitNullProperties: Boolean = true
   restrictCharset: Boolean = false
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 "#;
 
@@ -119,6 +119,10 @@ fn lexical_names(module: &Module) -> Vec<String> {
 /// `pkl:jsonnet`, as Pkl source. pklr keeps functions and classes in one
 /// namespace, so the classes its functions build are named `...Class`.
 const JSONNET_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is Renderer) Pair(name, prop.value) else prop
+}
 function ImportStr(_path: String) = new ImportStrClass { path = _path }
 
 function ExtVar(_name: String) = new ExtVarClass { name = _name }
@@ -128,7 +132,7 @@ class Renderer {
   indent: String? = "  "
   omitNullProperties: Boolean = true
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 class ImportStrClass { path: String }
@@ -137,6 +141,10 @@ class ExtVarClass { name: String }
 
 /// `pkl:json`, as Pkl source.
 const JSON_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is JsonRenderer) Pair(name, prop.value) else prop
+}
 class Parser {
   useMapping: Boolean = false
   converters = new Mapping {}
@@ -145,6 +153,10 @@ class Parser {
 
 /// `pkl:yaml`, as Pkl source.
 const YAML_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is YamlRenderer) Pair(name, prop.value) else prop
+}
 class Parser {
   mode: "compat" | "1.1" | "1.2" = "compat"
   useMapping: Boolean = false
@@ -155,6 +167,10 @@ class Parser {
 
 /// `pkl:xml`, as Pkl source.
 const XML_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is Renderer) Pair(name, prop.value) else prop
+}
 class Renderer {
   extension = "xml"
   indent: String = "  "
@@ -162,7 +178,7 @@ class Renderer {
   rootElementName: String = "root"
   rootElementAttributes = new Mapping {}
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 function Element(_name: String): Dynamic = new Dynamic {
@@ -186,6 +202,18 @@ struct Invoker<'e>(&'e mut Evaluator, usize);
 impl Invoke for Invoker<'_> {
     fn invoke(&mut self, function: &Value, arg: Value) -> Result<Value> {
         self.0.invoke_lambda(function, &[arg], self.1)
+    }
+
+    fn invoke_all(&mut self, function: &Value, args: &[Value]) -> Result<Value> {
+        self.0.invoke_lambda(function, args, self.1)
+    }
+
+    fn property_annotations(
+        &mut self,
+        source: &crate::value::ObjectSource,
+        name: &str,
+    ) -> Result<Vec<Value>> {
+        self.0.property_annotation_values(source, name, self.1)
     }
 }
 
@@ -1016,6 +1044,7 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         mapping_value_types: Vec::new(),
         deprecated: Default::default(),
         poisoned_members: None,
+        module_annotations: None,
         declared_as: None,
         kind: crate::value::ObjectKind::Object,
         is_parsed_json: false,

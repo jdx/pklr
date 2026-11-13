@@ -713,6 +713,13 @@ impl Converters {
 /// Calls Pkl functions on behalf of the renderers.
 pub(crate) trait Invoke {
     fn invoke(&mut self, function: &Value, arg: Value) -> Result<Value>;
+
+    /// Call `function` with several arguments.
+    fn invoke_all(&mut self, function: &Value, args: &[Value]) -> Result<Value>;
+
+    /// The annotations of the property `name` of an instance of the class
+    /// `source` describes, evaluated.
+    fn property_annotations(&mut self, source: &ObjectSource, name: &str) -> Result<Vec<Value>>;
 }
 
 /// A renderer's settings, read from a renderer object.
@@ -729,6 +736,10 @@ pub(crate) struct Settings {
     pub xml_version: String,
     pub xml_root_name: String,
     pub xml_root_attributes: Option<ObjectMap>,
+    /// The renderer object, which `ConvertProperty` annotations receive.
+    pub renderer: Value,
+    /// `convertPropertyTransformers`, keyed by annotation class.
+    pub property_transformers: Converters,
 }
 
 impl Settings {
@@ -794,6 +805,8 @@ impl Settings {
                 Some(Value::Object(map, _)) => Some((**map).clone()),
                 _ => None,
             },
+            renderer: renderer.clone(),
+            property_transformers: Converters::from_mapping(get("convertPropertyTransformers"))?,
         })
     }
 
@@ -851,6 +864,8 @@ pub(crate) struct Walk<'a> {
     /// The kind of the value directly enclosing the one being visited.
     pub(crate) enclosing: Option<Kind>,
     top_kind: Option<Kind>,
+    renderer: &'a Value,
+    property_transformers: &'a Converters,
 }
 
 impl<'a> Walk<'a> {
@@ -865,7 +880,64 @@ impl<'a> Walk<'a> {
             skip_null_entries: skip_nulls && settings.kind != RendererKind::Pcf,
             enclosing: None,
             top_kind,
+            renderer: &settings.renderer,
+            property_transformers: &settings.property_transformers,
         }
+    }
+
+    /// Apply the `ConvertProperty` annotations of the property `name` of an
+    /// instance of the class `source` describes. `None` if it has none.
+    fn annotated_property(
+        &mut self,
+        source: &ObjectSource,
+        name: &Arc<str>,
+        value: &Value,
+    ) -> Result<Option<(Arc<str>, Value)>> {
+        let annotations = self.invoke.property_annotations(source, name)?;
+        let mut converted: Option<(Arc<str>, Value)> = None;
+        for annotation in annotations {
+            let annotation = match self
+                .property_transformers
+                .find(&annotation, Kind::Typed, &[])
+            {
+                Some(transformer) => {
+                    let transformer = transformer.clone();
+                    self.invoke.invoke(&transformer, annotation)?
+                }
+                None => annotation,
+            };
+            let Value::Object(members, _) = &annotation else {
+                continue;
+            };
+            let Some(render @ Value::Lambda(..)) = members.get("render") else {
+                continue;
+            };
+            let (key, value) = match &converted {
+                Some((key, value)) => (key.clone(), value.clone()),
+                None => (name.clone(), value.clone()),
+            };
+            let mut pair = ObjectMap::default();
+            pair.insert("first".into(), Value::String(key));
+            pair.insert("second".into(), value);
+            let pair = super::stdlib::typed_object("Pair", pair);
+            let result = self
+                .invoke
+                .invoke_all(render, &[pair, self.renderer.clone()])?;
+            let rendered = match &result {
+                Value::Object(pair, _) => pair.get("first").zip(pair.get("second")),
+                _ => None,
+            };
+            match rendered {
+                Some((Value::String(key), value)) => converted = Some((key.clone(), value.clone())),
+                _ => {
+                    return Err(Error::Eval(format!(
+                        "Expected value of type `Pair<String, Any>`, but got `{}`.",
+                        display_value(&result)
+                    )));
+                }
+            }
+        }
+        Ok(converted)
     }
 
     /// The kind of `value`, honoring the top-level override once.
@@ -1065,10 +1137,26 @@ pub(crate) trait StringRenderer<'a> {
                 self.name()
             )));
         }
+        // Only an instance of a class can have annotated properties.
+        let annotated_source = source.filter(|source| {
+            source.module_annotations.is_some()
+                || (source.type_identity.is_some()
+                    && source.entries.iter().any(
+                        |entry| matches!(entry, Entry::Property(prop) if !prop.annotations.is_empty()),
+                    ))
+        });
         let mut is_first = true;
         for (member, key, value) in ordered {
             match member {
                 MemberKind::Property => {
+                    let renamed = match annotated_source {
+                        Some(source) => self.walk().annotated_property(source, key, value)?,
+                        None => None,
+                    };
+                    let (key, value) = match &renamed {
+                        Some((key, value)) => (key, value),
+                        None => (key, value),
+                    };
                     self.walk().path.push(PathPart::Property(key.clone()));
                     let converted = self.walk().convert(value)?;
                     if !(self.walk().skip_null_properties && converted == Value::Null) {
