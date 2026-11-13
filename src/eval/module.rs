@@ -1615,10 +1615,6 @@ impl Evaluator {
         // order, so a member can read one declared after it. A member that
         // fails is poisoned rather than failing the module: as in Pkl, the
         // error surfaces only where the member is used (or rendered, below).
-        for (body, message) in &module.deferred_const_violations {
-            self.deferred_const
-                .insert(*body, Arc::from(message.as_str()));
-        }
         let mut class_names: std::collections::HashSet<Name> = std::collections::HashSet::default();
         let mut evaluated: HashMap<&str, Value> = HashMap::default();
         let mut failed: HashMap<&str, String> = HashMap::default();
@@ -1630,6 +1626,13 @@ impl Evaluator {
                 .or_insert_with(|| (Arc::clone(body), Arc::new(module_evaluation_plan(body))))
                 .1,
         );
+        // The lambda bodies are keyed by address. `plan_cache` holds the
+        // module body for the evaluator's lifetime, so the addresses stay
+        // valid and cannot be reused by another allocation.
+        for (body, message) in &module.deferred_const_violations {
+            self.deferred_const
+                .insert(*body, Arc::from(message.as_str()));
+        }
         let mut todo = plan.order.clone();
         // A member can fail because it read another before that one could be
         // evaluated: through a dynamic `module[key]`, which the order can't
