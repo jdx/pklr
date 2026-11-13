@@ -516,15 +516,15 @@ impl Evaluator {
                         "Cannot find property `{field}` in object of type `Dynamic`."
                     )));
                 }
+                if let Value::List(items) = &obj
+                    && let Some(result) = list_property(&obj, items, field)
+                {
+                    return result;
+                }
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::Object(..), "simpleName") if class_simple_name(&obj).is_some() => {
                         return Ok(class_simple_name(&obj).unwrap());
-                    }
-                    (Value::List(items), _)
-                        if let Some(result) = list_property(&obj, items, field) =>
-                    {
-                        return result;
                     }
                     (Value::String(s), "length") => {
                         return Ok(Value::Int(s.chars().count() as i64));
