@@ -633,7 +633,8 @@ fn type_has_constraint(
                 .any(|arg| type_has_constraint(arg, aliases, depth + 1))
                 || aliases.get(name.as_str()).is_some_and(|(params, body)| {
                     let body = substitute_type(body, params, args);
-                    type_has_constraint(&body, aliases, depth + 1)
+                    type_size(&body, EXPANSION_LIMIT) < EXPANSION_LIMIT
+                        && type_has_constraint(&body, aliases, depth + 1)
                 })
         }
         TypeExpr::Named(name) => aliases
@@ -641,6 +642,27 @@ fn type_has_constraint(
             .is_some_and(|(_, body)| type_has_constraint(body, aliases, depth + 1)),
     }
 }
+
+/// The number of nodes in a type, counted up to `limit`.
+fn type_size(ty: &TypeExpr, limit: usize) -> usize {
+    let mut count = 1;
+    let children: &[TypeExpr] = match ty {
+        TypeExpr::Nullable(inner) => std::slice::from_ref(inner),
+        TypeExpr::Union(items) | TypeExpr::Generic(_, items) => items,
+        _ => &[],
+    };
+    for child in children {
+        if count >= limit {
+            break;
+        }
+        count += type_size(child, limit - count);
+    }
+    count
+}
+
+/// The most nodes an expanded alias may have before the check gives up, which
+/// keeps repeated parameters from growing a type exponentially.
+const EXPANSION_LIMIT: usize = 4096;
 
 /// Replace the parameters of a generic type alias by the arguments it is used with.
 fn substitute_type(ty: &TypeExpr, params: &[String], args: &[TypeExpr]) -> TypeExpr {
@@ -685,7 +707,9 @@ fn reference_with_constraint(
             }
             if let Some((params, body)) = aliases.get(name.as_str()) {
                 let body = substitute_type(body, params, args);
-                if reference_with_constraint(&body, reference, aliases, depth + 1) {
+                if type_size(&body, EXPANSION_LIMIT) < EXPANSION_LIMIT
+                    && reference_with_constraint(&body, reference, aliases, depth + 1)
+                {
                     return true;
                 }
             }
