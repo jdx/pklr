@@ -1969,3 +1969,36 @@ fn renderer_is_checks_distinguish_renderer_classes() {
         "false true"
     );
 }
+
+#[test]
+fn pcf_converters_skip_pair_members_and_tell_map_from_mapping() {
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { [Int] = (it) -> it + 1; [Pair] = (it) -> Pair(it.second, it.first) } }.renderValue(List(Pair(1, 2), 5))"#
+        ),
+        "List(Pair(2, 1), 6)"
+    );
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { [Mapping] = (it) -> (it) { ["m"] = 0 } } }.renderValue(Map("a", 1))"#
+        ),
+        "Map(\"a\", 1)"
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn amending_a_module_does_not_repeat_the_elements_of_an_inherited_member() {
+    let dir = TestTempDir::new("pklr_render_amend_elements");
+    std::fs::write(dir.path().join("base.pkl"), "o { \"p\"; \"q\" }\n").unwrap();
+    let path = dir.path().join("main.pkl");
+    std::fs::write(
+        &path,
+        "amends \"base.pkl\"\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_text(&path).unwrap(),
+        "{\n  \"o\": [\n    \"p\",\n    \"q\"\n  ]\n}\n"
+    );
+}

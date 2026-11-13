@@ -1523,6 +1523,24 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_ref()) || reads_super(prop) {
                     continue;
                 }
+                // An amendment's elements add to the member it amends, which
+                // already holds them: evaluating the body again would append
+                // them a second time. Only a read of a member this module
+                // defines can change what the body makes.
+                if prop.value.is_none()
+                    && let Some(body) = &prop.body
+                    && entries_are_listing_amendment(body)
+                    && scope.vars.contains_key(prop.name.as_ref())
+                    && !{
+                        let reads = referenced_roots(body);
+                        reads.iter().any(|name| {
+                            child_property_names.contains(name.as_ref())
+                                || matches!(name.as_ref(), "this" | "module" | "super")
+                        })
+                    }
+                {
+                    continue;
+                }
                 match self.eval_property_with(prop, scope, depth, true) {
                     Ok(Some(value)) => {
                         change = change.then(scope.get(&prop.name), &value, can_stop).then(

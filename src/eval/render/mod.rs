@@ -672,7 +672,11 @@ impl Converters {
                 },
                 _ => None,
             },
-            Kind::Mapping => self.class("Mapping").or_else(|| self.class("Map")),
+            // A `Map` has no source; a `Mapping` does.
+            Kind::Mapping => match value {
+                Value::Object(_, None) => self.class("Map"),
+                _ => self.class("Mapping"),
+            },
             Kind::Dynamic => self.class("Dynamic"),
             Kind::IntSeq => self.class("IntSeq"),
             Kind::Bytes => self.class("Bytes"),
