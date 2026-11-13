@@ -149,6 +149,45 @@ impl TypeExpr {
     }
 }
 
+/// The name of `ty` as written, with the constraints of its type arguments:
+/// `List<String(!isEmpty)>`. A constrained type's own constraint is the one
+/// that `Constrained` carries beside this name, so a type argument is the only
+/// place a constraint is kept in the text.
+pub(super) fn type_expr_constrained_name(ty: &TypeExpr) -> String {
+    fn sources(constraint: &Expr, out: &mut Vec<String>) {
+        match constraint {
+            Expr::Binop(BinOp::And, left, right) => {
+                sources(left, out);
+                sources(right, out);
+            }
+            Expr::Constraint(_, text) => out.push(text.to_string()),
+            _ => {}
+        }
+    }
+    match ty {
+        TypeExpr::Generic(name, args) => format!(
+            "{}<{}>",
+            name,
+            args.iter()
+                .map(type_expr_constrained_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeExpr::Nullable(inner) => format!("{}?", type_expr_constrained_name(inner)),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .map(type_expr_constrained_name)
+            .collect::<Vec<_>>()
+            .join("|"),
+        TypeExpr::Constrained(base, constraint, _) => {
+            let mut texts = Vec::new();
+            sources(constraint, &mut texts);
+            format!("{base}({})", texts.join(", "))
+        }
+        other => type_expr_runtime_name(other),
+    }
+}
+
 pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name) => name.clone(),

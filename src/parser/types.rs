@@ -210,7 +210,13 @@ impl<'a> Parser<'a> {
                 }
                 self.expect2(&TokenKind::RParen, ")", ",")?;
                 ty = TypeExpr::Constrained(
-                    type_expr_runtime_name(&ty),
+                    match &ty {
+                        TypeExpr::Generic(..) => type_expr_constrained_name(&ty),
+                        TypeExpr::Nullable(inner) if matches!(**inner, TypeExpr::Generic(..)) => {
+                            type_expr_constrained_name(&ty)
+                        }
+                        _ => type_expr_runtime_name(&ty),
+                    },
                     Box::new(constraint.expect("at least one constraint")),
                     if quoted_name && matches!(ty, TypeExpr::Named(_)) {
                         BaseForm::Quoted

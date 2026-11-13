@@ -236,6 +236,51 @@ fn null_rejects_a_class_and_names_an_int_seq() {
 
 // Expectations compared with `pkl eval` 0.32.2.
 #[test]
+fn constrained_generic_still_checks_its_element_constraints() {
+    let json = eval(
+        r#"
+import "pkl:test"
+class Y {
+  function l(l): List<String(!isEmpty)>(!isEmpty) = l
+  function map(map): Map<String(!isEmpty), Int(isPositive)>(!isEmpty) = map
+}
+local y = new Y {}
+r1 = test.catch(() -> y.l(List("1", "")))
+r2 = test.catch(() -> y.map(Map("1", 1, "2", -2)))
+r3 = y.l(List("1"))
+"#,
+    );
+    assert_eq!(
+        json["r1"],
+        "Type constraint `!isEmpty` violated. Value: \"\""
+    );
+    assert_eq!(
+        json["r2"],
+        "Type constraint `isPositive` violated. Value: -2"
+    );
+    assert_eq!(json["r3"], serde_json::json!(["1"]));
+    let error = eval_fails("a: List<String(!isEmpty)>(!isEmpty) = 5\n");
+    assert!(
+        error.contains("Expected value of type `List`, but got type `Int`."),
+        "{error}"
+    );
+}
+
+#[test]
+fn constrained_generic_keeps_element_constraints_in_unions_and_nullables() {
+    let err = eval_fails("a: List<String(!isEmpty)|Int>(!isEmpty) = List(\"\")\n");
+    assert!(err.contains("`!isEmpty`"), "{err}");
+    let err = eval_fails("a: List<String(!isEmpty)>?(true) = List(\"\")\n");
+    assert!(err.contains("`!isEmpty`"), "{err}");
+    assert_eq!(
+        eval(
+            "a: List<String(!isEmpty)|Int>(!isEmpty) = List(\"x\", 3)\nb: List<String(!isEmpty)>?(true) = null\n"
+        ),
+        serde_json::json!({"a": ["x", 3], "b": null})
+    );
+}
+
+#[test]
 fn constraint_reads_local_member_of_inherited_class() {
     let json = eval(
         r#"
@@ -300,4 +345,41 @@ fn a_class_converter_returning_an_object_with_an_undefined_member_fails() {
         .unwrap();
     let err = ev.apply_converters(val).unwrap_err().to_string();
     assert!(err.contains("`age`"), "{err}");
+}
+
+// Expectation compared with `pkl eval` 0.32.2.
+#[test]
+fn constrained_mapping_keeps_value_defaults_with_a_comma_in_its_key_constraint() {
+    let json = eval(
+        r#"
+class Node { x = 1 }
+class H { m: Mapping<String(length.isBetween(1, 3)), Node>(true) }
+h = new H { m { ["a"] {} } }
+"#,
+    );
+    assert_eq!(json["h"]["m"]["a"]["x"], 1);
+    let json = eval(
+        r#"
+class Node { x = 1 }
+class H { m: Mapping<String(this != "("), Node>(true) }
+h = new H { m { ["a"] {} } }
+"#,
+    );
+    assert_eq!(json["h"]["m"]["a"]["x"], 1);
+    let json = eval(
+        r##"
+class Node { x = 1 }
+class H { m: Mapping<String(this != #"a"b("#), Node>(true) }
+h = new H { m { ["a"] {} } }
+"##,
+    );
+    assert_eq!(json["h"]["m"]["a"]["x"], 1);
+    let json = eval(
+        r#"
+class Node { x = 1 }
+class H { m: Mapping<String(this != "é\u{e9}"), Node>(true) }
+h = new H { m { ["a"] {} } }
+"#,
+    );
+    assert_eq!(json["h"]["m"]["a"]["x"], 1);
 }
