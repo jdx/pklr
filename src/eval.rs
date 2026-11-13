@@ -40,6 +40,7 @@ mod parsers;
 mod prefetch;
 mod reference;
 mod reflect;
+mod reflect_base;
 mod relative_path;
 mod remote;
 pub(crate) mod render;
@@ -261,10 +262,21 @@ pub struct Evaluator {
     /// Names declared by `module a.b.C` headers, by module identity (see
     /// `module_type_namespace`), for error messages.
     module_names: HashMap<String, String>,
+    /// The classes and type aliases each module declares, by module identity,
+    /// for `pkl:reflect`.
+    module_declarations: HashMap<String, Arc<Vec<crate::parser::Declaration>>>,
+    /// The declarations of parsed modules, by the address of the module's
+    /// body, which the weak reference confirms is still that module's.
+    parsed_declarations: HashMap<usize, ParsedDeclarations>,
     /// Whether an evaluation moved to the large stack, so what the evaluator
     /// holds may be nested too deeply to free on a small one.
     grew: bool,
 }
+
+type ParsedDeclarations = (
+    std::sync::Weak<Vec<crate::parser::Entry>>,
+    Arc<Vec<crate::parser::Declaration>>,
+);
 
 #[derive(Clone, Default)]
 struct MappingInheritedDefault {
