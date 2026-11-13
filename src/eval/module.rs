@@ -1691,6 +1691,7 @@ impl Evaluator {
                         // evaluation errors can depend on members declared
                         // later in the module and remain retryable.
                         if let Some(parent_name) = parent.as_deref() {
+                            let parent_name = supertype_through_aliases(scope, parent_name);
                             let parent_val = resolve_dotted(scope, parent_name);
                             check_supertype(scope, name, parent_name, parent_val.as_ref())?;
                         }
