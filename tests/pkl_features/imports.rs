@@ -23,7 +23,7 @@ fn encoded_file_uris_resolve_amends_imports_and_extends() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let amend_base = dir.join("Amend Base.pkl");
-    std::fs::write(&amend_base, "answer = 7\n").unwrap();
+    std::fs::write(&amend_base, "answer = 7\nresult = 0\n").unwrap();
     let amend_uri = encoded_file_uri(&amend_base);
     let amended = dir.join("Amended.pkl");
     std::fs::write(
@@ -629,6 +629,7 @@ fn imported_amends_base_uses_inherited_scope() {
         dir.join("Base.pkl"),
         r#"
 name = meta.name
+baseName = ""
 "#,
     )
     .unwrap();
@@ -1322,6 +1323,7 @@ fn scoped_inherited_base_does_not_pollute_import_cache() {
         dir.join("Base.pkl"),
         r#"
 name = meta.name
+result = ""
 "#,
     )
     .unwrap();
@@ -1351,7 +1353,11 @@ result = name
 fn imported_amends_and_extends_bases_keep_separate_values() {
     let temp = TestTempDir::new("pklr_test_imported_dual_inherited_bases");
     let dir = temp.path();
-    std::fs::write(dir.join("AmendsBase.pkl"), r#"amendsName = meta.name"#).unwrap();
+    std::fs::write(
+        dir.join("AmendsBase.pkl"),
+        "amendsName = meta.name\namended = \"\"\nextended = \"\"\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("ExtendsBase.pkl"),
         r#"open module ExtendsBase
@@ -2031,7 +2037,7 @@ fn import_glob_keeps_modules_an_amended_base_reads() {
     std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
     std::fs::write(
         dir.join("base.pkl"),
-        "fromBase = Parts[\"parts/b.pkl\"].value\n",
+        "fromBase = Parts[\"parts/b.pkl\"].value\nfromChild = \"\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -2112,7 +2118,7 @@ fn import_glob_in_a_base_keeps_modules_its_children_read() {
     std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
     std::fs::write(
         dir.join("A.pkl"),
-        "open module A\nimport* \"parts/*.pkl\" as X\na = X[\"parts/a.pkl\"].value\n",
+        "open module A\nimport* \"parts/*.pkl\" as X\na = X[\"parts/a.pkl\"].value\nc = \"\"\n",
     )
     .unwrap();
     std::fs::write(

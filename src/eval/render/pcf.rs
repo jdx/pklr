@@ -455,7 +455,7 @@ impl<'a> StringRenderer<'a> for Pcf<'a> {
                     .filter_map(|name| map.get(*name).cloned())
                     .collect(),
             ),
-            (Kind::IntSeq, _) => {
+            (Kind::IntSeq | Kind::Bytes, _) => {
                 self.out.push_str(&display_value(value));
                 return Ok(true);
             }
