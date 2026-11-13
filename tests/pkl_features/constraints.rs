@@ -290,3 +290,14 @@ fn a_path_converter_keeps_an_undefined_member_failing() {
     let err = ev.apply_converters(val).unwrap_err().to_string();
     assert!(err.contains("`age`"), "{err}");
 }
+
+#[test]
+fn a_class_converter_returning_an_object_with_an_undefined_member_fails() {
+    let src = "class P { age: Int }\nitem = new P {}\noutput { renderer = new JsonRenderer { converters { [P] = (it) -> it } } }\n";
+    let mut ev = pklr::eval::Evaluator::new();
+    let val = ev
+        .eval_source(src, std::path::Path::new("test.pkl"))
+        .unwrap();
+    let err = ev.apply_converters(val).unwrap_err().to_string();
+    assert!(err.contains("`age`"), "{err}");
+}

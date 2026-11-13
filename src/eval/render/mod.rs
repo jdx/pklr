@@ -1013,12 +1013,11 @@ pub(crate) trait StringRenderer<'a> {
         map: &ObjectMap,
         source: Option<&ObjectSource>,
     ) -> Result<()> {
-        // The module-wide failed-member check cannot match a path converter,
-        // so it is made here, as in the JSON conversion walk.
-        if self.walk().converters.has_paths()
-            && let Some(member) = source
-                .and_then(|source| source.poisoned_members.as_ref())
-                .and_then(|members| members.values().find(|member| member.rendered))
+        // A failed member of an object that is rendered, a converter's
+        // result included, fails here, as in the JSON conversion walk.
+        if let Some(member) = source
+            .and_then(|source| source.poisoned_members.as_ref())
+            .and_then(|members| members.values().find(|member| member.rendered))
         {
             return Err(Error::Eval(member.message.clone()));
         }
@@ -1689,14 +1688,14 @@ impl JsonValue<'_> {
                 // values. This includes typed keys stored with an internal
                 // mapping-key prefix.
                 let converts_keys = !self.converters.is_empty();
-                // The module-wide failed-member check cannot match a path
-                // converter, so it is made here, where the path is known and
-                // a converter has already replaced what it matches.
-                if self.track_path
-                    && let Some(member) = source
-                        .as_ref()
-                        .and_then(|source| source.poisoned_members.as_ref())
-                        .and_then(|members| members.values().find(|member| member.rendered))
+                // The module-wide check skips what a converter replaces and
+                // cannot match a path converter, so it is made here: on every
+                // object this walk reaches, which includes a converter's
+                // result.
+                if let Some(member) = source
+                    .as_ref()
+                    .and_then(|source| source.poisoned_members.as_ref())
+                    .and_then(|members| members.values().find(|member| member.rendered))
                 {
                     return Err(Error::Eval(member.message.clone()));
                 }
