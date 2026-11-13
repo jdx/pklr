@@ -178,10 +178,10 @@ impl Evaluator {
                     members.insert("second".into(), self.eval_expr(second, scope, depth + 1)?);
                     return Ok(stdlib::typed_object("Pair", members));
                 }
-                // `Null(default)` is null. Its default, which pkl lets a body
-                // amend, is not modelled and not evaluated here.
+                // `Null(default)` is a null value that carries a default object or
+                // function for amending; pklr keeps only the null.
                 "Null" if args.len() == 1 && scope.get("Null").is_none() => {
-                    return Ok(Value::Null);
+                    return self.null_default(&args[0], scope, depth);
                 }
                 "Regex" => {
                     if let Some(arg) = args.first() {
@@ -885,5 +885,38 @@ fn is_default_member_ref(expr: &Expr) -> bool {
             name == "default" && matches!(base.as_ref(), Expr::Ident(base) if base == "super")
         }
         _ => false,
+    }
+}
+
+impl Evaluator {
+    /// `Null(default)`: the null a valid default stands for. Kept out of line
+    /// so it adds nothing to the evaluator's stack frame.
+    #[inline(never)]
+    fn null_default(&mut self, arg: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+        // Only the selected branch counts.
+        if let Expr::If(cond, then_expr, else_expr) = arg {
+            let c = self.eval_expr(cond, scope, depth + 1)?;
+            let branch = if is_truthy(&c) { then_expr } else { else_expr };
+            return self.null_default(branch, scope, depth + 1);
+        }
+        // A `new` default is not built: it may name the class being
+        // instantiated, whose property this is.
+        if matches!(arg, Expr::New(..)) {
+            return Ok(Value::Null);
+        }
+        match self.eval_expr(arg, scope, depth + 1)? {
+            // Dynamic and Listing objects are held as lists.
+            // A class is not an `Object`.
+            value @ Value::Object(..) if !is_class_value(&value) => Ok(Value::Null),
+            Value::Lambda(..) => Ok(Value::Null),
+            Value::List(items) if matches!(items.kind(), ListKind::Dynamic | ListKind::Listing) => {
+                Ok(Value::Null)
+            }
+            other => Err(Error::Eval(format!(
+                "Expected value of type `Object | Function<Object>`, but got type `{}`.\nValue: {}",
+                pkl_class_name(&other),
+                render::display_value(&other)
+            ))),
+        }
     }
 }

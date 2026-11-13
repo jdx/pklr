@@ -41,7 +41,14 @@ impl<'a> Parser<'a> {
         }
         if let Some(index) = default_index {
             let ty = std::mem::replace(&mut variants[index], TypeExpr::Named(String::new()));
-            variants[index] = mark_default_type(ty);
+            match ty {
+                // `*(A|*B)` defaults to the inner default: the union is spliced
+                // in, keeping its own marker.
+                TypeExpr::Union(inner) if inner.iter().any(is_marked) => {
+                    variants.splice(index..=index, inner);
+                }
+                ty => variants[index] = mark_default_type(ty),
+            }
         }
         Ok(TypeExpr::Union(variants))
     }
@@ -237,5 +244,14 @@ pub(super) fn mark_default_type(ty: TypeExpr) -> TypeExpr {
             TypeExpr::Nullable(Box::new(mark_default_type(*inner)))
         }
         ty => TypeExpr::Named(format!("*{}", type_expr_runtime_name(&ty))),
+    }
+}
+
+/// Whether a union alternative carries a `*` default marker.
+fn is_marked(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _, _) => name.starts_with('*'),
+        TypeExpr::Nullable(inner) => is_marked(inner),
+        _ => false,
     }
 }

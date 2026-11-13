@@ -954,15 +954,14 @@ impl Evaluator {
         );
         // An imported module whose failed property this output renders fails
         // the output, as rendering that property directly would.
-        if depth == 0
-            && self.rendered_member_failed
-            && let Some(message) = out.values().find_map(rendered_member_failure)
-        {
-            return Err(Error::Eval(message.to_string()));
-        }
         let module_map = Arc::new(out);
         if depth == 0 {
             self.eval_module_output(module, &module_map, &scope, path, depth)?;
+            if self.rendered_member_failed
+                && let Some(message) = self.unconverted_module_failure(&module_map)
+            {
+                return Err(Error::Eval(message));
+            }
         }
         Ok(Value::Object(module_map, source))
     }

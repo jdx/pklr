@@ -1013,6 +1013,14 @@ pub(crate) trait StringRenderer<'a> {
         map: &ObjectMap,
         source: Option<&ObjectSource>,
     ) -> Result<()> {
+        // A failed member of an object that is rendered, a converter's
+        // result included, fails here, as in the JSON conversion walk.
+        if let Some(member) = source
+            .and_then(|source| source.poisoned_members.as_ref())
+            .and_then(|members| members.values().find(|member| member.rendered))
+        {
+            return Err(Error::Eval(member.message.clone()));
+        }
         self.start_object(kind)?;
         let previous = self.walk().enclosing.replace(kind);
         let members = Members::new(kind, source);
@@ -1680,6 +1688,17 @@ impl JsonValue<'_> {
                 // values. This includes typed keys stored with an internal
                 // mapping-key prefix.
                 let converts_keys = !self.converters.is_empty();
+                // The module-wide check skips what a converter replaces and
+                // cannot match a path converter, so it is made here: on every
+                // object this walk reaches, which includes a converter's
+                // result.
+                if let Some(member) = source
+                    .as_ref()
+                    .and_then(|source| source.poisoned_members.as_ref())
+                    .and_then(|members| members.values().find(|member| member.rendered))
+                {
+                    return Err(Error::Eval(member.message.clone()));
+                }
                 let members = (self.track_path || converts_keys)
                     .then(|| Members::new(kind, source.as_deref()));
                 let mut changed: Option<ObjectMap> = None;

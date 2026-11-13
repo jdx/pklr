@@ -1772,3 +1772,13 @@ fn pcf_collection_members_keep_their_path_for_nested_converters() {
         "List(new {\n  a = 11\n})"
     );
 }
+
+#[test]
+fn text_output_with_an_unrelated_path_converter_keeps_a_failed_member_failing() {
+    let (_dir, path) = module_file(
+        "pklr_render_text_path_converter_failed_member",
+        "class P { age: Int }\nitem = new P {}\nother = 1\noutput {\n  renderer = new YamlRenderer { converters { [\"other\"] = (it) -> it } }\n}\n",
+    );
+    let err = pklr::eval_to_text(&path).unwrap_err().to_string();
+    assert!(err.contains("`age`"), "{err}");
+}

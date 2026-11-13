@@ -169,6 +169,21 @@ fn null_function_returns_null() {
 }
 
 #[test]
+fn a_marked_nested_union_defaults_to_its_inner_default() {
+    let json = eval("b: *(\"a\"|*\"b\")|\"c\"\nc: (\"a\"|*\"b\")|*\"c\"\n");
+    assert_eq!(json["b"], "b");
+    assert_eq!(json["c"], "c");
+}
+
+#[test]
+fn a_converter_fills_in_a_nested_undefined_property() {
+    let json = eval_with_converters(
+        "class Person { name: String; age: Int }\nres = new Person { name = \"pigeon\" }\noutput { renderer = new JsonRenderer { converters { [Person] = (it) -> (it) { age = 40 } } } }\n",
+    );
+    assert_eq!(json["res"]["age"], 40);
+}
+
+#[test]
 fn stdlib_alias_with_extra_constraint() {
     assert_eq!(
         eval("a: UInt8(this != 1) = 2\n"),
@@ -191,6 +206,32 @@ fn stdlib_alias_ignores_user_names() {
     assert!(err.contains("isBetween(0, 255)"), "{err}");
     let err = eval_fails("class Char {}\na: Char = 1\n");
     assert!(err.contains("type `Char`"), "{err}");
+}
+
+#[test]
+fn null_default_accepts_a_dynamic_or_listing_reference() {
+    let json = eval(
+        "local d = new Dynamic { 1 }\nlocal l = new Listing { 1 }\na = Null(d)\nb = Null(l)\n",
+    );
+    assert!(json["a"].is_null() && json["b"].is_null());
+    let err = eval_fails("a = Null(List(1))\n");
+    assert!(err.contains("Object | Function<Object>"), "{err}");
+}
+
+#[test]
+fn an_unrelated_converter_keeps_an_undefined_member_failing() {
+    let err = eval_fails(
+        "class P { age: Int }\nclass Q { x = 1 }\nres = new P {}\noutput { renderer = new JsonRenderer { converters { [Q] = (it) -> it } } }\n",
+    );
+    assert!(err.contains("`age`"), "{err}");
+}
+
+#[test]
+fn null_rejects_a_class_and_names_an_int_seq() {
+    let err = eval_fails("a = Null(Int)\n");
+    assert!(err.contains("Object | Function<Object>"), "{err}");
+    let err = eval_fails("a = Null(IntSeq(1, 3))\n");
+    assert!(err.contains("got type `IntSeq`"), "{err}");
 }
 
 // Expectations compared with `pkl eval` 0.32.2.
@@ -276,6 +317,34 @@ fn list_single_rest_and_or_null_members() {
         error.contains("Expected a single-element collection."),
         "{error}"
     );
+}
+
+#[test]
+fn null_default_does_not_build_a_conditional_new_default() {
+    let json = eval("a = Null(if (true) new Listing { throw(\"unused\") } else new Listing {})\n");
+    assert!(json["a"].is_null());
+}
+
+#[test]
+fn a_path_converter_keeps_an_undefined_member_failing() {
+    let src = "class P { age: Int }\nitem = new P {}\nother = 1\noutput { renderer = new JsonRenderer { converters { [\"other\"] = (it) -> it } } }\n";
+    let mut ev = pklr::eval::Evaluator::new();
+    let val = ev
+        .eval_source(src, std::path::Path::new("test.pkl"))
+        .unwrap();
+    let err = ev.apply_converters(val).unwrap_err().to_string();
+    assert!(err.contains("`age`"), "{err}");
+}
+
+#[test]
+fn a_class_converter_returning_an_object_with_an_undefined_member_fails() {
+    let src = "class P { age: Int }\nitem = new P {}\noutput { renderer = new JsonRenderer { converters { [P] = (it) -> it } } }\n";
+    let mut ev = pklr::eval::Evaluator::new();
+    let val = ev
+        .eval_source(src, std::path::Path::new("test.pkl"))
+        .unwrap();
+    let err = ev.apply_converters(val).unwrap_err().to_string();
+    assert!(err.contains("`age`"), "{err}");
 }
 
 // Expectation compared with `pkl eval` 0.32.2.
