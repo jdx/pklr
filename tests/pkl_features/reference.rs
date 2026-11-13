@@ -487,8 +487,8 @@ n = p.label.getPath().length
 #[test]
 fn reference_subscripts_dynamic_referent() {
     let result = run(r#"
-local r = ref.Reference(d, Dynamic, null)
-n = r["key"].getPath().length
+local dyn = ref.Reference(d, Dynamic, null)
+n = dyn["key"].getPath().length
 "#);
     assert_eq!(result["n"], 1);
 }
