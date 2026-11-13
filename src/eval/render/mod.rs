@@ -1488,7 +1488,15 @@ pub(crate) fn java_double_to_string(value: f64) -> String {
         .into();
     }
     // Shortest round-tripping digits and the decimal exponent.
-    let scientific = format!("{:e}", value.abs());
+    let mut scientific = format!("{:e}", value.abs());
+    // Java writes at least two digits, the closest two-digit decimal that
+    // still reads back as the same double: `4.9E-324`, not `5.0E-324`.
+    if !scientific.contains('.') {
+        let two = format!("{:.1e}", value.abs());
+        if !two.contains(".0e") && two.parse::<f64>() == Ok(value.abs()) {
+            scientific = two;
+        }
+    }
     let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
     let exponent: i32 = exponent.parse().unwrap_or(0);
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
@@ -1896,6 +1904,9 @@ mod tests {
             (1e-5, "1.0E-5"),
             (123456789.123, "1.23456789123E8"),
             (0.1 + 0.2, "0.30000000000000004"),
+            (4.9e-324, "4.9E-324"),
+            (2e-323, "2.0E-323"),
+            (1e23, "1.0E23"),
             (100.0, "100.0"),
             (-0.0, "-0.0"),
             (f64::NAN, "NaN"),

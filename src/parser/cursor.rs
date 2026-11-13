@@ -22,6 +22,7 @@ impl<'a> Parser<'a> {
             declarations: Vec::new(),
             declaration_nesting: 0,
             bodyless_methods: Vec::new(),
+            method_signatures: Vec::new(),
             type_uses: std::collections::HashSet::new(),
             in_alias_definition: None,
             alias_definition_uses: std::collections::HashMap::new(),

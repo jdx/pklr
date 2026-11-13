@@ -161,6 +161,7 @@ impl Evaluator {
             module_names: HashMap::default(),
             module_declarations: HashMap::default(),
             parsed_declarations: HashMap::default(),
+            reflecting_classes: Vec::new(),
             grew: false,
         }
     }

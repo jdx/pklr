@@ -63,9 +63,6 @@ impl<'a> Parser<'a> {
         match self.peek() {
             TokenKind::Minus => {
                 self.advance();
-                if matches!(self.peek(), TokenKind::Minus | TokenKind::Bang) {
-                    return Err(self.parse_error("unexpected token in prefix expression"));
-                }
                 // 2^63 is only a valid integer literal when this unary minus
                 // supplies its sign. Keeping it distinct from `IntLit` makes
                 // `1 - 9223372036854775808` reject instead of treating the
@@ -74,15 +71,14 @@ impl<'a> Parser<'a> {
                     self.advance();
                     return Ok(Expr::Int(i64::MIN));
                 }
-                let operand = self.parse_postfix()?;
+                self.deepen()?;
+                let operand = self.parse_unary()?;
                 Ok(Expr::Unop(UnOp::Neg, Box::new(operand)))
             }
             TokenKind::Bang => {
                 self.advance();
-                if matches!(self.peek(), TokenKind::Minus | TokenKind::Bang) {
-                    return Err(self.parse_error("unexpected token in prefix expression"));
-                }
-                Ok(Expr::Unop(UnOp::Not, Box::new(self.parse_postfix()?)))
+                self.deepen()?;
+                Ok(Expr::Unop(UnOp::Not, Box::new(self.parse_unary()?)))
             }
             _ => self.parse_postfix(),
         }

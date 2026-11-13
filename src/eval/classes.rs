@@ -18,6 +18,7 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        let parent_name = parent_name.map(|name| supertype_through_aliases(scope, name));
         let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
         if let Some(parent_name) = parent_name {
             check_supertype(scope, class_name, parent_name, parent_val.as_ref())?;
@@ -791,6 +792,18 @@ pub(super) fn qualified_class_name(identity: Option<&str>, name: &str) -> String
 
 /// Check that `class class_name extends parent_name` names a class pkl lets
 /// user code extend.
+/// An alias that only names another type, with no arguments or constraint,
+/// stands for that type as a supertype.
+pub(super) fn supertype_through_aliases<'a>(scope: &'a Scope, mut name: &'a str) -> &'a str {
+    for _ in 0..16 {
+        match scope.get_type_alias(name) {
+            Some(crate::parser::TypeExpr::Named(target)) => name = target.as_str(),
+            _ => break,
+        }
+    }
+    name
+}
+
 pub(super) fn check_supertype(
     scope: &Scope,
     class_name: &str,

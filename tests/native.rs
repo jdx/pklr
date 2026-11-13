@@ -1158,8 +1158,8 @@ fn long_operator_chains_are_parse_errors() {
 #[test]
 fn long_prefix_and_body_chains_do_not_crash() {
     const TERMS: usize = 100_000;
-    // `- - x` and `! ! x` are not Pkl syntax; long runs of them are a plain
-    // syntax error, not a stack overflow.
+    // `- - x` and `! ! x` are Pkl syntax; long runs of them hit the nesting
+    // limit, not the stack.
     for (name, source) in [
         ("prefix_neg", format!("value = {}1\n", "- ".repeat(TERMS))),
         (
@@ -1168,7 +1168,7 @@ fn long_prefix_and_body_chains_do_not_crash() {
         ),
     ] {
         let error = deep_source_error(name, source);
-        assert!(error.contains("unexpected token"), "{name}: {error}");
+        assert!(error.contains("levels deep"), "{name}: {error}");
     }
     for (name, source) in [
         (
