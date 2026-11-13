@@ -728,10 +728,11 @@ impl Evaluator {
         let mut current = (module.amends.clone(), path.to_path_buf());
         for _ in 0..self.max_depth {
             let (Some(uri), from) = current else { break };
-            if uri.contains("://") {
+            let local = uri.starts_with("file:") || uri.starts_with("modulepath:");
+            if uri.contains("://") && !local {
                 break;
             }
-            let Ok(base_path) = self.resolve_local_path(&from, &uri) else {
+            let Ok(base_path) = self.local_file_path(&from, &uri) else {
                 break;
             };
             let Ok(base) = self.parse_file(&base_path) else {

@@ -8232,5 +8232,8 @@ fn file_uri_base_rejects_undeclared_properties() {
     let r = pklr::eval_to_json(&dir.join("child.pkl"));
     let _ = std::fs::remove_dir_all(&dir);
     let msg = format!("{:?}", r.unwrap_err());
-    assert!(msg.contains("Cannot find property `b`"), "{msg}");
+    assert!(
+        msg.contains("Cannot find property `b` in module `base`"),
+        "{msg}"
+    );
 }
