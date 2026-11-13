@@ -3,6 +3,8 @@
 
 use super::*;
 
+const MESSAGE: &str = "Expected a module as argument, but got an object that amends a module.";
+
 impl Evaluator {
     /// The URI of the module an expression names: `module`, an import's name
     /// or an `import(...)` expression. `None` for any other expression, whose
@@ -44,6 +46,7 @@ impl Evaluator {
         other: &Expr,
         scope: &Scope,
     ) -> Option<Result<Value>> {
+        self.module_arg_used |= matches!(other, Expr::Ident(name) if name == "module");
         let from = self.module_uri_of(receiver, scope)?;
         let to = self.module_uri_of(other, scope)?;
         let directory = |uri: &str| {
@@ -110,9 +113,7 @@ impl Evaluator {
                 poisoned.insert(
                     name.clone(),
                     PoisonedMember {
-                        message:
-                            "Expected a module as argument, but got an object that amends a module."
-                                .into(),
+                        message: MESSAGE.into(),
                         rendered: *rendered,
                     },
                 );

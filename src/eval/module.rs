@@ -1781,6 +1781,7 @@ impl Evaluator {
                             }
                             continue;
                         }
+                        self.module_arg_used = false;
                         let mut property_result = self
                             .eval_property_with(prop, scope, depth, true)
                             .and_then(|value| {
@@ -1793,6 +1794,18 @@ impl Evaluator {
                                 }
                                 Ok(value)
                             });
+                        if std::mem::take(&mut self.module_arg_used)
+                            && let Some(namespace) = &scope.type_namespace
+                        {
+                            let hidden = has_modifier(&prop.modifiers, Modifier::Hidden);
+                            let members = self
+                                .module_arg_members
+                                .entry(namespace.clone())
+                                .or_default();
+                            if !members.iter().any(|(name, _)| *name == prop.name) {
+                                members.push((prop.name.clone(), !hidden));
+                            }
+                        }
                         // A member that reads its own members through the
                         // module (`foo.b`, `module.foo.b`) needs `foo` to exist
                         // while it is built: give it the members that do not

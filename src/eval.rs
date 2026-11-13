@@ -188,6 +188,9 @@ pub struct Evaluator {
     /// copy of the module makes `module` the amending object, so reading one
     /// of them there fails.
     module_arg_members: HashMap<String, Vec<(Name, bool)>>,
+    /// Set when `relativePathTo(module)` runs, so the module member being
+    /// evaluated can be recorded in `module_arg_members`.
+    module_arg_used: bool,
     /// Environment variables read during evaluation (name → observed value).
     env_reads: BTreeMap<String, Option<String>>,
     /// Local files currently being evaluated with inherited scope.

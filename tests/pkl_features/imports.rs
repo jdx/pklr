@@ -4602,3 +4602,27 @@ fn relative_path_to_rejects_an_amended_module_argument() {
         serde_json::json!(["x"])
     );
 }
+
+#[test]
+fn relative_path_to_amended_module_argument_edge_cases() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to_amended_edges");
+    let root = temp.path().join("root.pkl");
+    let msg = "Expected a module as argument, but got an object that amends a module.";
+    // A wrapped call, and the amendment evaluated before the member.
+    std::fs::write(
+        &root,
+        "result = (module) { dummy = 0 }.path\n\
+         hidden path = if (true) module.relativePathTo(module) else List()\n\
+         dummy = 42\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&root).unwrap_err().to_string();
+    assert!(err.contains(msg), "{err}");
+    // An unrelated member of the same name in a nested object is not affected.
+    std::fs::write(
+        &root,
+        "c { a = module.relativePathTo(module) }\na = 42\nresult = (module) {}.a\n",
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&root).unwrap()["result"], 42);
+}

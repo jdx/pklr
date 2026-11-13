@@ -89,17 +89,6 @@ impl Evaluator {
             {
                 return Err(Error::Eval(message));
             }
-            if let Expr::Call(func, args) = expr
-                && matches!(&**func, Expr::Field(_, method) if method == "relativePathTo")
-                && matches!(args.as_slice(), [Expr::Ident(name)] if name == "module")
-                && let Some(namespace) = &scope.type_namespace
-            {
-                let hidden = has_modifier(&prop.modifiers, Modifier::Hidden);
-                self.module_arg_members
-                    .entry(namespace.clone())
-                    .or_default()
-                    .push((prop.name.clone(), !hidden));
-            }
             apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref(), scope);
             return Ok(Some(value));
         }
