@@ -77,3 +77,15 @@ fn long_this_chain_settles_when_amended() {
     );
     assert_eq!(v["b"], serde_json::json!(vec![9; 10]));
 }
+
+#[test]
+fn listing_local_may_read_the_default() {
+    let v = eval("l = new Listing { local n = default.apply(0).x; default { x = 1 }; n }\n");
+    assert_eq!(v["l"], serde_json::json!([1]));
+}
+
+#[test]
+fn shadowed_default_name_does_not_break_elements() {
+    let v = eval("l = new Listing { default { n = 1 }; let (`default` = 0) new { m = 2 } }\n");
+    assert_eq!(v["l"], serde_json::json!([{"n": 1, "m": 2}]));
+}

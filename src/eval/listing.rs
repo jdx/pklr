@@ -205,7 +205,7 @@ impl Evaluator {
                     parser::rewrite_untyped_result_new(&mut element, &mut |body| {
                         let made = Expr::Call(
                             Box::new(Expr::Field(
-                                Box::new(Expr::Ident("default".into())),
+                                Box::new(Expr::Ident(LISTING_DEFAULT.into())),
                                 "apply".into(),
                             )),
                             vec![Expr::Int(index)],
@@ -417,6 +417,15 @@ impl Evaluator {
         };
         // The function sees the body's own locals.
         let mut scope = scope.child();
+        if let Some(inherited @ Value::Lambda(..)) = scope.get(LISTING_DEFAULT).cloned() {
+            scope.set("default", inherited);
+        }
+        // A local may call a body-form `default`, which does not see the
+        // body's locals yet: bind a first version for it to read.
+        if prop.value.is_none() {
+            let first = self.eval_expr(&function, &scope, depth + 1)?;
+            scope.set("default", first);
+        }
         self.bind_listing_members(entries, &mut scope, false, depth)?;
         self.eval_expr(&function, &scope, depth + 1).map(Some)
     }
@@ -564,7 +573,11 @@ impl Evaluator {
                     elem_class,
                 )?;
             }
-            let settled = !layers.reads_this || final_items.as_ref() == Some(&items);
+            let settled = !layers.reads_this
+                || final_items.as_ref().is_some_and(|prev| {
+                    prev.len() == items.len()
+                        && prev.iter().zip(&items).all(|(a, b)| a.same_data(b))
+                });
             let limit = items.len() + layers.layers.len() + 4;
             final_items = Some(items);
             if settled || pass > limit {
