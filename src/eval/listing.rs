@@ -581,9 +581,15 @@ impl Evaluator {
                 )?;
             }
             // A function holds the elements it read, which `same_data` does
-            // not follow, so a list of functions runs every pass.
+            // not follow; a chain of them is at most as long as there are
+            // functions, so that many extra passes follow once the data is
+            // equal.
+            let functions = items
+                .iter()
+                .filter(|item| matches!(item, Value::Lambda(..)))
+                .count();
             let settled = !layers.reads_this
-                || (!items.iter().any(|item| matches!(item, Value::Lambda(..)))
+                || (pass > functions
                     && final_items.as_ref().is_some_and(|prev| {
                         prev.len() == items.len()
                             && prev.iter().zip(&items).all(|(a, b)| a.same_data(b))
