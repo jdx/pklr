@@ -584,7 +584,7 @@ impl Evaluator {
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
-            (Value::Object(map, _), name @ ("every" | "any")) => {
+            (Value::Object(map, None), name @ ("every" | "any")) => {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval(format!("{name} requires a function")))?;

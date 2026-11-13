@@ -1820,3 +1820,36 @@ fn null_for_a_class_type_reports_null() {
         "{msg}"
     );
 }
+
+#[test]
+fn generic_alias_arguments_keep_their_meaning() {
+    let json = eval(
+        r#"
+typealias L<T> = List<T>
+nested = List(List(1)) is L<L<Int>>
+typealias B = String
+typealias P<A, B> = Pair<A, B>
+pair = Pair("a", 1) is P<B, Int>
+"#,
+    );
+    assert_eq!(json["nested"], true);
+    assert_eq!(json["pair"], true);
+}
+
+#[test]
+fn user_methods_named_every_and_any_still_run() {
+    let json = eval("class C { function any() = 42 }\nresult = new C {}.any()");
+    assert_eq!(json["result"], 42);
+}
+
+#[test]
+fn aliased_constrained_dynamic_default_is_checked() {
+    let msg = eval_fails("typealias D = Dynamic(false)\nx: D");
+    assert!(msg.contains("Type constraint `false` violated."), "{msg}");
+}
+
+#[test]
+fn element_mismatch_keeps_the_property_name() {
+    let msg = eval_fails("xs: List<Int> = List(\"x\")");
+    assert!(msg.contains("in property 'xs'"), "{msg}");
+}

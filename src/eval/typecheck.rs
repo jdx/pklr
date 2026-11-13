@@ -687,7 +687,7 @@ impl Evaluator {
             );
         }
         if let Some(message) = self.element_mismatch(ty, val, scope) {
-            return message;
+            return format!("{message}{location}");
         }
         let expected = top_level_error_type(ty, scope);
         if is_null_value(val) && !matches!(ty, crate::parser::TypeExpr::Union(_)) {
@@ -780,6 +780,7 @@ impl Evaluator {
         &mut self,
         val: &Value,
         name: &str,
+        args: &[crate::parser::TypeExpr],
         scope: &Scope,
         depth: usize,
         resolving: &[String],
@@ -797,6 +798,12 @@ impl Evaluator {
         let Some(declaring) = self.module_type_scope(&identity) else {
             return Ok(None);
         };
+        if !args.is_empty()
+            && let Some(accepted) =
+                self.check_generic_alias(val, member, args, (&declaring, scope), depth, resolving)?
+        {
+            return Ok(Some(accepted));
+        }
         // Names that name an alias are tracked per module: another module's
         // `A` is not this one.
         let key = format!("{identity}|{member}");
@@ -846,7 +853,7 @@ impl Evaluator {
                     );
                 }
                 if let Some(accepted) =
-                    self.check_imported_alias(val, name, scope, depth, resolving)?
+                    self.check_imported_alias(val, name, &[], scope, depth, resolving)?
                 {
                     return Ok(accepted);
                 }
@@ -963,7 +970,7 @@ impl Evaluator {
                         resolving,
                     )?
                 } else if let Some(accepted) =
-                    self.check_imported_alias(val, class_name, scope, depth, resolving)?
+                    self.check_imported_alias(val, class_name, &[], scope, depth, resolving)?
                 {
                     accepted
                 } else if let Some(accepted) =
@@ -1101,9 +1108,14 @@ impl Evaluator {
                     };
                 }
                 if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
-                    if let Some(accepted) =
-                        self.check_generic_alias(val, name, args, &module_scope, depth, resolving)?
-                    {
+                    if let Some(accepted) = self.check_generic_alias(
+                        val,
+                        name,
+                        args,
+                        (&module_scope, scope),
+                        depth,
+                        resolving,
+                    )? {
                         return Ok(accepted);
                     }
                     return self.eval_alias_check(
@@ -1116,14 +1128,14 @@ impl Evaluator {
                     );
                 }
                 if let Some(accepted) =
-                    self.check_imported_alias(val, name, scope, depth, resolving)?
+                    self.check_imported_alias(val, name, args, scope, depth, resolving)?
                 {
                     return Ok(accepted);
                 }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     if let Some(accepted) =
-                        self.check_generic_alias(val, name, args, scope, depth, resolving)?
+                        self.check_generic_alias(val, name, args, (scope, scope), depth, resolving)?
                     {
                         return Ok(accepted);
                     }
@@ -1146,7 +1158,7 @@ impl Evaluator {
         val: &Value,
         name: &str,
         args: &[crate::parser::TypeExpr],
-        declaring: &Scope,
+        (declaring, use_scope): (&Scope, &Scope),
         depth: usize,
         resolving: &[String],
     ) -> Result<Option<bool>> {
@@ -1163,7 +1175,15 @@ impl Evaluator {
         if params.len() != args.len() {
             return Ok(None);
         }
-        let key = alias_key(declaring, name);
+        // Applications of one alias to other arguments are no cycle.
+        let key = format!(
+            "{}<{}>",
+            alias_key(declaring, name),
+            args.iter()
+                .map(display_type_expr)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         if resolving.contains(&key) {
             return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
         }
@@ -1171,9 +1191,18 @@ impl Evaluator {
         for (param, arg) in params.iter().zip(args) {
             // An argument that is the parameter's own name stands for
             // itself in the scope it was written in.
-            if !matches!(arg, TypeExpr::Named(arg) if arg == param) {
-                inner.set_type_alias(*param, arg.clone());
+            if matches!(arg, TypeExpr::Named(arg) if arg == param) {
+                continue;
             }
+            // An argument naming another parameter's name means what it
+            // means where it was written, not the parameter.
+            let written = match arg {
+                TypeExpr::Named(n) if params.contains(&n.as_str()) => {
+                    use_scope.get_type_alias(n).unwrap_or(arg)
+                }
+                _ => arg,
+            };
+            inner.set_type_alias(*param, written.clone());
         }
         let body = body.clone();
         // The parameters shadow aliases of the same name that are being

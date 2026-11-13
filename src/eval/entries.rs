@@ -337,7 +337,7 @@ impl Evaluator {
             // The default of a constrained `Dynamic` is checked against its
             // constraint like any other value. (Other defaults are template
             // values that a subclass or amendment may replace.)
-            if matches!(ty, crate::parser::TypeExpr::Constrained(base, ..) if base == "Dynamic")
+            if names_constrained_dynamic(ty, scope)
                 && let Some(default) = &default
             {
                 self.check_declared_value(default, ty, scope, depth)?;
@@ -2189,4 +2189,21 @@ fn collect_generated_locals(body: &Body, out: &mut Vec<Name>) {
             _ => {}
         }
     }
+}
+
+/// Whether `ty`, directly or through type aliases, is a constrained `Dynamic`.
+fn names_constrained_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    use crate::parser::TypeExpr;
+    let mut ty = ty;
+    for _ in 0..32 {
+        match ty {
+            TypeExpr::Constrained(base, ..) => return base == "Dynamic",
+            TypeExpr::Named(name) => match scope.get_type_alias(name) {
+                Some(next) => ty = next,
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
 }
