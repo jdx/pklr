@@ -1522,7 +1522,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 // A function type fixes the number of parameters.
                 name @ ("Function0" | "Function1" | "Function2" | "Function3" | "Function4"
                 | "Function5") => {
-                    matches!(val, Value::Lambda(params, ..) if params.len().to_string() == name[8..])
+                    matches!(val, Value::Lambda(params, ..) XX)
                 }
                 _ => matches!(val, Value::Object(..)),
             }
