@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.0](https://github.com/jdx/pklr/compare/v5.2.3...v6.0.0) - 2026-11-13
+
+### Added
+
+- *(stdlib)* add missing List, Set, Listing, Map and Bytes members ([#465](https://github.com/jdx/pklr/pull/465))
+- *(eval)* add pkl:ref module ([#461](https://github.com/jdx/pklr/pull/461))
+- *(eval)* reflect declared types with doc comments, annotations and locations ([#460](https://github.com/jdx/pklr/pull/460))
+- *(eval)* check Listing and Mapping members when read ([#458](https://github.com/jdx/pklr/pull/458))
+- *(eval)* [**breaking**] add pkl:reflect and Class members, bare getClass(), module-named type aliases ([#448](https://github.com/jdx/pklr/pull/448))
+- *(eval)* give a module a class that getClass() answers ([#436](https://github.com/jdx/pklr/pull/436))
+- *(eval)* enforce const scopes and const/fixed overrides ([#432](https://github.com/jdx/pklr/pull/432))
+- *(eval)* GlobAccess for globs over a host-provided file system ([#423](https://github.com/jdx/pklr/pull/423))
+- *(eval)* resource-specific capability hooks ([#421](https://github.com/jdx/pklr/pull/421))
+- *(eval)* read modulepath: resources from the module path ([#420](https://github.com/jdx/pklr/pull/420))
+- *(eval)* resolve modulepath: imports against a module path ([#415](https://github.com/jdx/pklr/pull/415))
+- *(eval)* add allowed_modules policy like pkl --allowed-modules ([#412](https://github.com/jdx/pklr/pull/412))
+- *(stdlib)* parse YAML with yaml.Parser and report JSON parse errors like pkl ([#405](https://github.com/jdx/pklr/pull/405))
+- *(eval)* implement Any.getClass() and Class.simpleName ([#392](https://github.com/jdx/pklr/pull/392))
+
+### Fixed
+
+- *(render)* apply ConvertProperty annotations and render object keys as values ([#464](https://github.com/jdx/pklr/pull/464))
+- *(eval)* match pkl on chained prefix operators, Boolean conditions, float printing and more ([#463](https://github.com/jdx/pklr/pull/463))
+- *(eval)* resolve an inherited public member through pkl:ref when a local shadows it ([#467](https://github.com/jdx/pklr/pull/467))
+- *(reflect)* mirror member types, hidden members and inherited union defaults ([#466](https://github.com/jdx/pklr/pull/466))
+- *(eval)* Listing default, late-bound this, super.default and getOrDefault ([#457](https://github.com/jdx/pklr/pull/457))
+- *(eval)* reject an amended module as the relativePathTo argument ([#456](https://github.com/jdx/pklr/pull/456))
+- *(eval)* [**breaking**] typeAliasConstraint3 and localPropertyInAmendingModule ([#455](https://github.com/jdx/pklr/pull/455))
+- *(eval)* IntSeq members, relativePathTo, toMapping amendment, spread error text ([#454](https://github.com/jdx/pklr/pull/454))
+- *(eval)* raise the seven errors Pkl raises where pklr succeeded ([#453](https://github.com/jdx/pklr/pull/453))
+- *(eval)* show an empty class instance by its class in type mismatch errors ([#452](https://github.com/jdx/pklr/pull/452))
+- *(eval)* reject undeclared properties in amending modules, check plain overrides, add Bytes and List.toMap ([#449](https://github.com/jdx/pklr/pull/449))
+- *(eval)* late-bind super calls and class bodies reading later members ([#451](https://github.com/jdx/pklr/pull/451))
+- *(eval)* [**breaking**] type constraint failures (generic alias args, messages, Map every/any, Dynamic defaults) ([#450](https://github.com/jdx/pklr/pull/450))
+- *(eval)* listing this/super reads, isDistinct, typed locals over existing listings, typed amend params ([#446](https://github.com/jdx/pklr/pull/446))
+- *(eval)* module types, extends module, amending chains, glob keys ([#447](https://github.com/jdx/pklr/pull/447))
+- *(eval)* Null(default), nested union defaults, converters over undefined members ([#443](https://github.com/jdx/pklr/pull/443))
+- *(eval)* keep element constraints of a constrained generic type ([#442](https://github.com/jdx/pklr/pull/442))
+- *(eval)* check the constraints of the standard library type aliases ([#435](https://github.com/jdx/pklr/pull/435))
+- *(eval)* read List, Set and Listing members through ?. ([#445](https://github.com/jdx/pklr/pull/445))
+- *(eval)* amend Mapping/Listing/Dynamic classes, replace mapping entries, pkl-style subscript and spread errors ([#439](https://github.com/jdx/pklr/pull/439))
+- *(eval)* local members never override, list argument errors name the element ([#438](https://github.com/jdx/pklr/pull/438))
+- *(eval)* resolve local members and type names in property constraints ([#437](https://github.com/jdx/pklr/pull/437))
+- *(eval)* render List, Set, Map, Pair and IntSeq as Pcf calls ([#441](https://github.com/jdx/pklr/pull/441))
+- *(eval)* stop a module that amends this from hanging a caught error ([#440](https://github.com/jdx/pklr/pull/440))
+- *(eval)* reject a type qualified by a property, class or local ([#434](https://github.com/jdx/pklr/pull/434))
+- *(eval)* accept a module and its amendments as the module type ([#430](https://github.com/jdx/pklr/pull/430))
+- *(eval)* typed locals, late-bound super, and local overrides ([#429](https://github.com/jdx/pklr/pull/429))
+- *(eval)* reject invalid glob imports and non-type names in declared types ([#431](https://github.com/jdx/pklr/pull/431))
+- *(eval)* check new Listing/Mapping type arguments and reject object keys in JSON ([#427](https://github.com/jdx/pklr/pull/427))
+- *(eval)* member predicates and element indexes on Dynamic amendments ([#426](https://github.com/jdx/pklr/pull/426))
+- *(eval)* match pkl on small error cases ([#433](https://github.com/jdx/pklr/pull/433))
+- *(eval)* report a violated type constraint by its source text ([#428](https://github.com/jdx/pklr/pull/428))
+- *(eval)* match relative imports from module path modules as modulepath: URIs ([#424](https://github.com/jdx/pklr/pull/424))
+- *(eval)* free a deep result and its evaluator without overflowing the caller's stack ([#425](https://github.com/jdx/pklr/pull/425))
+- *(eval)* apply an amended function default in Mapping.getOrDefault ([#416](https://github.com/jdx/pklr/pull/416))
+- *(eval)* match allowed_modules against the modulepath: uri ([#417](https://github.com/jdx/pklr/pull/417))
+- *(test)* build unit tests under the eval-core feature set ([#418](https://github.com/jdx/pklr/pull/418))
+- *(eval)* evaluate deeply nested modules instead of failing at depth 32 ([#414](https://github.com/jdx/pklr/pull/414))
+- *(eval)* reject undefined properties and type aliases that replace a property ([#413](https://github.com/jdx/pklr/pull/413))
+- *(eval)* support function default and getOrDefault on Mapping ([#403](https://github.com/jdx/pklr/pull/403))
+- *(render)* reject pair, class, type alias and intseq values like pkl ([#404](https://github.com/jdx/pklr/pull/404))
+- *(eval)* read amended members declared later in the body and bind local objects ([#406](https://github.com/jdx/pklr/pull/406))
+- *(eval)* [**breaking**] reject unknown types in is/as and toDynamic on Dynamic/Mapping ([#396](https://github.com/jdx/pklr/pull/396))
+- *(eval)* build imported listing-of-mappings members from the declared type ([#400](https://github.com/jdx/pklr/pull/400))
+- *(eval)* make new { } elements of a typed Listing instances of its element class ([#393](https://github.com/jdx/pklr/pull/393))
+- *(eval)* keep members of an untyped body that also has elements ([#399](https://github.com/jdx/pklr/pull/399))
+- *(eval)* [**breaking**] tell an element-only Dynamic from a Listing, as pkl does ([#395](https://github.com/jdx/pklr/pull/395))
+- *(eval)* keep constraint on a default union alternative ([#389](https://github.com/jdx/pklr/pull/389))
+- *(eval)* reject amending a union property that has no default ([#394](https://github.com/jdx/pklr/pull/394))
+- *(eval)* skip imported module classes when rendering the module ([#388](https://github.com/jdx/pklr/pull/388))
+- *(eval)* amend an explicit null default as a Dynamic like pkl ([#391](https://github.com/jdx/pklr/pull/391))
+- *(eval)* resolve mapping value types in the declaring module's scope ([#390](https://github.com/jdx/pklr/pull/390))
+- *(eval)* [**breaking**] omit null properties in JSON output as pkl does by default ([#387](https://github.com/jdx/pklr/pull/387))
+
+### Other
+
+- *(deps)* lock file maintenance ([#377](https://github.com/jdx/pklr/pull/377))
+- *(deps)* lock file maintenance ([#373](https://github.com/jdx/pklr/pull/373))
+- *(deps)* lock file maintenance ([#367](https://github.com/jdx/pklr/pull/367))
+
 ## [5.2.3](https://github.com/jdx/pklr/compare/v5.2.2...v5.2.3) - 2026-11-02
 
 ### Fixed
