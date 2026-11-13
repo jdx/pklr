@@ -85,7 +85,13 @@ impl Evaluator {
         }
         declarations
             .iter()
-            .flat_map(|declaration| &declaration.annotations)
+            .flat_map(|declaration| {
+                let methods = declaration
+                    .bodyless_methods
+                    .iter()
+                    .flat_map(|method| &method.annotations);
+                declaration.annotations.iter().chain(methods)
+            })
             .map(|annotation| {
                 Entry::Elem(Expr::New(
                     Some(annotation.name.clone()),

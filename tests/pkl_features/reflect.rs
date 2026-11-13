@@ -383,3 +383,21 @@ message = reflect.Class(C).annotations[0].message
     assert_eq!(result["message"], json!("hi"));
     assert_eq!(result["used"], json!(1));
 }
+
+#[test]
+fn an_import_only_a_bodyless_method_annotation_uses_is_bound() {
+    let result = with_files(
+        &[("ann.pkl", "message = \"hi\"\nother = 1\n")],
+        r#"
+import "pkl:reflect"
+import "ann.pkl" as ann
+used = ann.other
+abstract class Shape {
+  @Deprecated { message = ann.message }
+  abstract function area(): Int
+}
+message = reflect.Class(Shape).methods["area"].annotations[0].message
+"#,
+    );
+    assert_eq!(result["message"], json!("hi"));
+}
