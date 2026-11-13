@@ -495,3 +495,15 @@ methods = reflect.Class(Child).methods.keys.toList()
     );
     assert_eq!(result, json!({"props": ["y"], "methods": ["g"]}));
 }
+
+#[test]
+fn null_safe_call_on_the_reflect_module_dispatches() {
+    let result = eval(
+        r#"
+import "pkl:reflect"
+class Foo { x = 1 }
+props = reflect?.Class(Foo).properties.keys.toList()
+"#,
+    );
+    assert_eq!(result, json!({"props": ["x"]}));
+}
