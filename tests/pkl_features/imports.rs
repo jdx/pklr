@@ -4488,3 +4488,18 @@ fn read_glob_keys_keep_the_dot_slash_prefix() {
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["keys"], serde_json::json!(["./a.txt"]));
 }
+
+#[test]
+fn import_glob_keys_keep_the_prefix_for_hidden_files() {
+    let temp = TestTempDir::new("pklr_test_glob_hidden_keys");
+    let dir = temp.path();
+    std::fs::write(dir.join(".hidden.pkl"), "value = 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "local m = import*(\"./.*.pkl\")\nkeys = m.keys.toList()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["keys"], serde_json::json!(["./.hidden.pkl"]));
+}

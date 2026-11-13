@@ -3373,3 +3373,17 @@ fn module_self_reads_see_members_evaluated_so_far() {
     let v = eval("foo { b = 1 }\nbar = module.foo.b\n");
     assert_eq!(v["bar"], 1);
 }
+
+#[test]
+fn closed_class_extending_module_rejects_unknown_properties() {
+    let err = eval_fails("class C extends module {}\nresult = new C { typo = 1 }\n");
+    assert!(err.contains("typo"), "{err}");
+}
+
+#[test]
+fn dynamic_member_predicates_do_not_bind_listing_members() {
+    let v = eval(
+        "local length = 5\nbase = new Dynamic { 1; 2 }\nres = (base) { [[length == 5]] = 9 }\n",
+    );
+    assert_eq!(v["res"], serde_json::json!([9, 9]));
+}

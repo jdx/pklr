@@ -842,7 +842,11 @@ impl Evaluator {
             .map(|matched_path| {
                 let mut rel_key = pathdiff_or_full(&matched_path, base_dir);
                 // Keys keep the pattern's own `./` prefix.
-                if uri.starts_with("./") && !rel_key.starts_with(['.', '/']) {
+                if uri.starts_with("./")
+                    && !(rel_key.starts_with("./")
+                        || rel_key.starts_with("../")
+                        || rel_key.starts_with('/'))
+                {
                     rel_key.insert_str(0, "./");
                 }
                 (matched_path, rel_key)

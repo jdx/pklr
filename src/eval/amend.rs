@@ -2298,6 +2298,10 @@ fn bind_listing_receiver(scope: &mut Scope, item: &Value) {
     let Value::List(items) = item else {
         return;
     };
+    // A `Dynamic` has no `length` or other collection members.
+    if items.kind() != ListKind::Listing {
+        return;
+    }
     let len = items.len();
     scope.set("length", Value::Int(len as i64));
     scope.set("isEmpty", Value::Bool(len == 0));
