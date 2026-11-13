@@ -102,6 +102,9 @@ pub(super) struct RefState {
     /// Set when a type being normalized has a constraint, which a referent
     /// type argument may not have.
     saw_constraint: bool,
+    /// Type arguments of generic aliases being expanded, by placeholder name:
+    /// the alias body resolves in its module, its arguments in the caller's.
+    bindings: HashMap<String, RType>,
 }
 
 impl RefState {
@@ -368,7 +371,14 @@ impl Evaluator {
                 {
                     let params: Vec<&str> = params.split(',').collect();
                     if params.len() == args.len() {
-                        let body = substitute(body, &params, args);
+                        let mut placeholders = Vec::with_capacity(args.len());
+                        for arg in args {
+                            let ty = self.normalize_type(arg, scope);
+                            let key = format!("\0arg{}", self.refs.bindings.len());
+                            self.refs.bindings.insert(key.clone(), ty);
+                            placeholders.push(TypeExpr::Named(key));
+                        }
+                        let body = substitute(body, &params, &placeholders);
                         self.normalize_into(&body, &declaring, out, depth + 1);
                         return;
                     }
@@ -401,6 +411,10 @@ impl Evaluator {
     }
 
     fn normalize_named(&mut self, name: &str, scope: &Scope, out: &mut Vec<RType>, depth: usize) {
+        if let Some(bound) = self.refs.bindings.get(name) {
+            out.push(bound.clone());
+            return;
+        }
         if let Some(literal) = name
             .strip_prefix('"')
             .and_then(|rest| rest.strip_suffix('"'))
@@ -467,6 +481,9 @@ impl Evaluator {
     /// The type arguments of `sub<args>` seen as its ancestor `sup`, or `None`
     /// when an ancestor on the way takes none of them.
     fn upcast_args(sub: &str, args: &[RType], sup: &str) -> Option<Vec<RType>> {
+        if sub == sup {
+            return Some(args.to_vec());
+        }
         let Some(mut current) = sub.strip_prefix("pkl:base#") else {
             return Some(Vec::new());
         };
@@ -699,11 +716,12 @@ impl Evaluator {
                 // As pkl, a key is of exactly the key type's class: `Any`,
                 // `Number` and `Collection` accept no `Int` or `List`.
                 match key {
-                    Value::Object(_, source) => source.as_ref().is_some_and(|source| {
-                        source.type_identity.as_deref() == Some(&**id)
-                            || (source.type_identity.is_none()
-                                && source.type_name.as_deref() == Some(name))
-                    }),
+                    Value::Object(_, source) => {
+                        let own = source.as_ref().and_then(|s| s.type_identity.as_deref());
+                        own == Some(&**id)
+                            || (own.is_none_or(|own| own.starts_with("pkl:"))
+                                && super::render::kind_of(key).pkl_class(key) == name)
+                    }
                     _ => value_type_name(key) == name,
                 }
             }

@@ -266,3 +266,42 @@ fn reference_has_no_document_form() {
     let json = value.to_json().to_string();
     assert!(!json.contains("\\u0000"), "{json}");
 }
+
+#[test]
+fn reference_to_a_reference_checks_nested_type_arguments() {
+    let result = run(r#"
+class P { v: ref.Reference<D, String> }
+local p = ref.Reference(d, P, null)
+local ok: ref.Reference<D, ref.Reference<D, Any>> = p.v
+res = ok.getPath().length
+"#);
+    assert_eq!(result["res"], 1);
+}
+
+#[test]
+fn reference_converters_see_class_declarations_after_evaluation() {
+    let src = format!(
+        r#"{PRELUDE}
+output {{
+  renderer = new JsonRenderer {{
+    converters {{ [ref.Reference] = (x) -> x.title.toString() }}
+  }}
+}}
+v = r
+"#
+    );
+    let result = eval_with_converters(&src);
+    assert_eq!(result["v"], "$.title");
+}
+
+#[test]
+fn reference_map_keys_match_map_key_types() {
+    let result = run(r#"
+class P { a: Mapping<Map<String, Int>, Int> = new {}; b: Map<Map<String, Int>, Int> = Map() }
+local p = ref.Reference(d, P, null)
+x = p.a[Map("a", 1)].getPath().length
+y = p.b[Map("a", 1)].getPath().length
+"#);
+    assert_eq!(result["x"], 2);
+    assert_eq!(result["y"], 2);
+}

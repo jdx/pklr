@@ -267,7 +267,7 @@ pub(crate) enum Kind {
 
 impl Kind {
     /// The Pkl class name used in error messages.
-    fn pkl_class(self, value: &Value) -> String {
+    pub(super) fn pkl_class(self, value: &Value) -> String {
         match self {
             Kind::Null => "Null".into(),
             Kind::Boolean => "Boolean".into(),

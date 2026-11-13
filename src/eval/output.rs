@@ -802,7 +802,11 @@ impl Evaluator {
     pub(crate) fn eval_file_json_blocking(&mut self, path: &Path) -> Result<serde_json::Value> {
         self.on_grown_stack(|this| {
             let module = this.eval_file(path)?;
-            let json = this.module_json(module)?;
+            let json = this.module_json(module);
+            // The converters have run; free the class declarations here, on
+            // the large stack.
+            this.refs.release();
+            let json = json?;
             // Only a run on the large stack can build a result too deep for
             // the caller's stack to free; failing here frees it on this one.
             if crate::stack::on_large_stack() && json_depth(&json) > crate::stack::MAX_RESULT_DEPTH
@@ -840,7 +844,11 @@ impl Evaluator {
     /// prints it.
     #[cfg(feature = "native-io")]
     pub(crate) fn eval_file_text_blocking(&mut self, path: &Path) -> Result<String> {
-        self.on_grown_stack(|this| this.eval_file_text_on_stack(path))
+        self.on_grown_stack(|this| {
+            let text = this.eval_file_text_on_stack(path);
+            this.refs.release();
+            text
+        })
     }
 
     #[cfg(feature = "native-io")]

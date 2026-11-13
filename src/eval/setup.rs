@@ -204,7 +204,6 @@ impl Evaluator {
                 self.parse_cache.clear();
                 self.plan_cache.clear();
                 self.body_roots_cache.clear();
-                self.refs.release();
             }
             result
         })
