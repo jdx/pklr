@@ -3939,14 +3939,14 @@ fn class_read_in_type_constraint_is_refreshed() {
         r#"
 class C { v = module.expected }
 const expected = "b"
-result = 1 is Int(module.C.v == "b")
+result = 1 is Int(new C {}.v == "b")
 "#,
     );
     assert_eq!(val["result"], true);
     let val = eval(
         r#"
 class C { v = module.expected }
-typealias Ok = Int(module.C.v == "b")
+typealias Ok = Int(new C {}.v == "b")
 const expected = "b"
 result = 1 is Ok
 "#,
@@ -3957,8 +3957,8 @@ result = 1 is Ok
 #[test]
 fn functions_reading_module_dynamically_are_refreshed() {
     for src in [
-        "local key = \"C\"\nclass C { v = module.expected }\nlocal function make() = module[key].v\nconst expected = \"b\"\nresult = make()\n",
-        "local key = \"C\"\nclass C { v = module.expected }\nfunction make() = module[key].v\nconst expected = \"b\"\nresult = make()\n",
+        "local key = \"C\"\nclass C { v = module.expected }\nlocal function make() = new C {}.v\nconst expected = \"b\"\nresult = make()\n",
+        "local key = \"C\"\nclass C { v = module.expected }\nfunction make() = new C {}.v\nconst expected = \"b\"\nresult = make()\n",
     ] {
         assert_eq!(eval(src)["result"], "b", "{src}");
     }

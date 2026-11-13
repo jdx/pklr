@@ -66,11 +66,19 @@ fn nesting_limit() -> usize {
     }
 }
 
+/// Whether any module parsed so far calls `getClass()` on its enclosing object
+/// without a receiver. Only then does the evaluator track the class of each
+/// object body for it.
+pub(crate) static BARE_GET_CLASS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// The doc comment, annotations and modifiers in front of a member.
 #[derive(Default)]
 struct MemberHeader {
     /// Offset of the first doc comment line
     doc_comment: Option<usize>,
+    /// The text of the doc comment, without the `///` markers
+    doc: Option<std::sync::Arc<str>>,
     annotations: Vec<Annotation>,
     /// Offset of the first annotation
     annotations_start: Option<usize>,

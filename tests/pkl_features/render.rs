@@ -1551,7 +1551,7 @@ typealias Email = String
 text = Email.toString()
 "#,
     );
-    assert_eq!(json["text"], "Email");
+    assert_eq!(json["text"], "test#Email");
 }
 
 #[test]
@@ -1564,8 +1564,8 @@ quoted = `contact.email`.toString()
 obj = (new Dynamic { alias = Email }).toString()
 "#,
     );
-    assert_eq!(json["quoted"], "contact.email");
-    assert_eq!(json["obj"], "new Dynamic { alias = Email }");
+    assert_eq!(json["quoted"], "test#contact.email");
+    assert_eq!(json["obj"], "new Dynamic { alias = test#Email }");
 }
 
 #[test]

@@ -394,3 +394,66 @@ nullSafe = module?.getClass().toString()
         serde_json::json!({"viaLambda": "Foo", "viaMethod": "Foo", "nullSafe": "Foo"})
     );
 }
+
+#[test]
+fn reflect_class_of_a_user_class() {
+    let result = eval(
+        r#"
+import "pkl:reflect"
+class Foo { x: Int = 1 }
+name = reflect.Class(Foo).name
+same = new Foo {}.getClass() == Foo
+"#,
+    );
+    assert_eq!(result, json!({"name": "Foo", "same": true}));
+}
+
+#[test]
+fn get_class_without_a_receiver_names_the_enclosing_object() {
+    let result = eval(
+        r#"
+class Foo { c = getClass() }
+dyn = new Dynamic { c = getClass() }.c == Dynamic
+typed = new Foo {}.c == Foo
+"#,
+    );
+    assert_eq!(result, json!({"dyn": true, "typed": true}));
+}
+
+#[test]
+fn type_alias_text_names_its_module() {
+    let result = eval("typealias Bar = String\ntext = Bar.toString()");
+    assert_eq!(result["text"], "test#Bar");
+}
+
+#[test]
+fn a_class_has_no_members_of_the_class_it_stands_for() {
+    let err = eval_fails("class Foo { x = 1 }\nres = 1.getClass().nope");
+    assert!(err.contains("Cannot find property `nope`"), "{err}");
+    let err = eval_fails("res = 1.getClass().nope()");
+    assert!(err.contains("Cannot find method `nope`"), "{err}");
+}
+
+#[test]
+fn a_user_class_has_no_members_of_the_class_it_stands_for() {
+    let result = eval(
+        r#"
+import "pkl:test"
+class Person { foo = 1; function bar() = 2 }
+res1 = test.catch(() -> Person.foo)
+res2 = test.catch(() -> Person.bar())
+"#,
+    );
+    assert!(
+        result["res1"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot find property `foo`")
+    );
+    assert!(
+        result["res2"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot find method `bar`")
+    );
+}

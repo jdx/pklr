@@ -8,12 +8,15 @@ impl<'a> Parser<'a> {
         let mut header = MemberHeader::default();
         if matches!(self.peek(), TokenKind::DocComment) {
             header.doc_comment = Some(self.peek_tok().offset);
+            let mut lines = vec![self.doc_comment_line()];
             self.advance();
             // Consecutive doc comment lines form one comment; a blank line
             // ends it, leaving a dangling doc comment.
             while matches!(self.peek(), TokenKind::DocComment) && !self.blank_line_before() {
+                lines.push(self.doc_comment_line());
                 self.advance();
             }
+            header.doc = Some(lines.join("\n").into());
         }
         while matches!(self.peek(), TokenKind::At) {
             header
@@ -26,6 +29,22 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         Ok(header)
+    }
+
+    /// The text of the doc comment line at the cursor, without `///` and the
+    /// space after it.
+    fn doc_comment_line(&self) -> String {
+        let offset = self.peek_tok().offset;
+        let line = self
+            .source
+            .get(offset..)
+            .and_then(|rest| rest.lines().next())
+            .unwrap_or_default();
+        let line = line.strip_prefix("///").unwrap_or(line);
+        line.strip_prefix(' ')
+            .unwrap_or(line)
+            .trim_end()
+            .to_string()
     }
 
     /// Whether an empty line separates the current token from the previous one.
@@ -437,6 +456,7 @@ impl<'a> Parser<'a> {
         }
         Ok(Entry::Property(std::sync::Arc::new(Property {
             annotations: header.annotations.clone(),
+            doc: header.doc.clone(),
             modifiers: header.modifiers(),
             name: name.into(),
             type_ann,
@@ -561,6 +581,7 @@ impl<'a> Parser<'a> {
             body: None,
             modifiers: header.modifiers(),
             annotations: header.annotations.clone(),
+            doc: header.doc.clone(),
             is_method: true,
         }))))
     }

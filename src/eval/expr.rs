@@ -265,6 +265,7 @@ impl Evaluator {
                             let vt_name = mapping_value_type_base(&generic_params[1]).to_string();
                             src_entries.push(Entry::Property(Arc::new(Property {
                                 annotations: vec![],
+                                doc: None,
                                 modifiers: vec![],
                                 name: "default".into(),
                                 type_ann: None,
@@ -576,8 +577,12 @@ impl Evaluator {
                     _ => {}
                 }
                 match &obj {
+                    // A `Class` has the members of `Class`, not those of the
+                    // class it stands for.
                     Value::Object(map, source) => {
-                        if let Some(message) = poisoned_member_error(source.as_deref(), field) {
+                        if let Some(message) = poisoned_member_error(source.as_deref(), field)
+                            .or_else(|| class_property_error(source.as_deref(), field))
+                        {
                             return Err(Error::Eval(message));
                         }
                         let hidden = || {
@@ -1403,4 +1408,15 @@ fn list_element_member(list: &Value, items: &ListValue, name: &str) -> Result<Va
             crate::eval::render::display_value(list)
         ))
     })
+}
+
+/// The error for a property a `Class` does not have.
+#[cold]
+#[inline(never)]
+fn class_property_error(source: Option<&ObjectSource>, field: &str) -> Option<String> {
+    // A module value is also of kind `Class`, but has its own members.
+    source.filter(|source| source.kind == ObjectKind::Class && !stdlib::is_module_class(source))?;
+    Some(format!(
+        "Cannot find property `{field}` in object of type `Class`."
+    ))
 }

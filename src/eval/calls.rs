@@ -3,6 +3,64 @@
 use super::*;
 
 impl Evaluator {
+    /// `getClass()` called without a receiver: a method of the enclosing
+    /// object, `this`.
+    #[inline(never)]
+    fn eval_bare_get_class(&mut self, scope: &Scope, depth: usize) -> Result<Value> {
+        if let Some(class) = scope.get(super::entries::THIS_CLASS) {
+            return Ok(class.clone());
+        }
+        let receiver = if scope.get("this").is_some() {
+            "this"
+        } else {
+            "module"
+        };
+        let call = Expr::Field(Box::new(Expr::Ident(receiver.into())), "getClass".into());
+        self.eval_call(&call, &[], scope, depth)
+    }
+
+    /// A call on a `Class` or on the `pkl:reflect` module, which neither
+    /// resolves like a call on an ordinary object.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn special_receiver_call(
+        &mut self,
+        receiver: &Expr,
+        obj: &Value,
+        method: &str,
+        arg_exprs: &[Expr],
+        args: &[Value],
+        scope: &Scope,
+        depth: usize,
+    ) -> Option<Box<Result<Value>>> {
+        let Value::Object(_, Some(source)) = obj else {
+            return None;
+        };
+        if source.kind != ObjectKind::Class && source.type_identity.is_none() {
+            return None;
+        }
+        if super::reflect::is_module(obj) {
+            return self
+                .reflect_call(method, arg_exprs, args, scope, depth)
+                .map(Box::new);
+        }
+        // A `Class` has the methods of `Class`, not those of the class it
+        // stands for.
+        if source.kind == ObjectKind::Class
+            && !stdlib::is_module_class(source)
+            && (source.entries.is_empty()
+                || !source
+                    .type_identity
+                    .as_deref()
+                    .is_some_and(|identity| identity.starts_with("pkl:")))
+            && !matches!(receiver, Expr::Ident(name) if matches!(name.as_str(), "super" | "this" | "module"))
+            && !matches!(method, "getClass" | "toString" | "hashCode")
+        {
+            return Some(Box::new(Err(class_method_error(method))));
+        }
+        None
+    }
+
     pub(super) fn eval_call(
         &mut self,
         func_expr: &Expr,
@@ -52,6 +110,11 @@ impl Evaluator {
                     }
                     _ => {}
                 }
+            }
+            if let Some(result) =
+                self.special_receiver_call(obj_expr, &obj, method, args, &evaled_args, scope, depth)
+            {
+                return *result;
             }
             // The same for an element-only `default`, which is a list and has no
             // `apply` of its own.
@@ -148,6 +211,9 @@ impl Evaluator {
         // Handle built-in functions: List(), Listing(), Map()
         if let Expr::Ident(name) = func_expr {
             match name.as_str() {
+                "getClass" if args.is_empty() && scope.get("getClass").is_none() => {
+                    return self.eval_bare_get_class(scope, depth);
+                }
                 "List" | "Listing" => {
                     let mut items = Vec::new();
                     for a in args {
@@ -919,4 +985,11 @@ impl Evaluator {
             ))),
         }
     }
+}
+
+/// The error for a method a `Class` does not have.
+#[cold]
+#[inline(never)]
+fn class_method_error(method: &str) -> Error {
+    Error::Eval(format!("Cannot find method `{method}` in class `Class`."))
 }
