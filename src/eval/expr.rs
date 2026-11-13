@@ -809,6 +809,9 @@ impl Evaluator {
                     return Err(Error::Eval(message));
                 }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
+                if is_module_snapshot_as_typed(&val, ty, scope) {
+                    return Ok(Value::Bool(true));
+                }
                 // A member that failed its own type check makes the value
                 // not of the type.
                 let matches = match self.eval_type_check(&val, ty, scope, depth) {
@@ -822,6 +825,9 @@ impl Evaluator {
                     return Err(Error::Eval(message));
                 }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
+                if is_module_snapshot_as_typed(&val, ty, scope) {
+                    return Ok(val);
+                }
                 if super::failed::type_holds_lazy(ty) {
                     return self.coerce_lazy(val, ty, scope, depth);
                 }
@@ -1494,4 +1500,17 @@ fn class_property_error(source: Option<&ObjectSource>, field: &str) -> Option<St
 #[inline(never)]
 fn member_read_error(source: Option<&ObjectSource>, field: &str) -> Option<String> {
     poisoned_member_error(source, field).or_else(|| class_property_error(source, field))
+}
+
+/// Whether `val` is the module's own `module` or `this` snapshot tested
+/// against `Typed`. The snapshot carries no source, which would otherwise make
+/// it look like a `Map`, but a module is `Typed`.
+fn is_module_snapshot_as_typed(val: &Value, ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    let (Value::Object(map, None), crate::parser::TypeExpr::Named(name)) = (val, ty) else {
+        return false;
+    };
+    name == "Typed"
+        && ["module", "this"].iter().any(|binding| {
+            matches!(scope.get(binding), Some(Value::Object(other, None)) if Arc::ptr_eq(map, other))
+        })
 }

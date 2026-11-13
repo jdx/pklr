@@ -1551,8 +1551,14 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             // Check the base type, ignore type parameters
             match name.trim_start_matches('*') {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-                "Map" | "Mapping" => {
+                "Map" => {
                     matches!(val, Value::Object(..))
+                        && !is_class_value(val)
+                        && !is_untyped_dynamic_object(val)
+                }
+                // A `Map` has no object source; a `Mapping` does.
+                "Mapping" => {
+                    matches!(val, Value::Object(_, Some(_)))
                         && !is_class_value(val)
                         && !is_untyped_dynamic_object(val)
                 }
