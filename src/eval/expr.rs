@@ -516,18 +516,16 @@ impl Evaluator {
                         "Cannot find property `{field}` in object of type `Dynamic`."
                     )));
                 }
+                if let Value::List(items) = &obj
+                    && let Some(result) = list_property(&obj, items, field)
+                {
+                    return result;
+                }
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::Object(..), "simpleName") if class_simple_name(&obj).is_some() => {
                         return Ok(class_simple_name(&obj).unwrap());
                     }
-                    (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
-                    (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
-                    (
-                        Value::List(items),
-                        field_name @ ("first" | "last" | "single" | "rest" | "firstOrNull"
-                        | "lastOrNull" | "singleOrNull" | "restOrNull" | "lastIndex"),
-                    ) => return list_element_member(&obj, items, field_name),
                     (Value::String(s), "length") => {
                         return Ok(Value::Int(s.chars().count() as i64));
                     }
@@ -629,6 +627,7 @@ impl Evaluator {
                     _ if self.stdlib_property(&obj, field).is_some() => {
                         self.stdlib_property(&obj, field).unwrap()
                     }
+                    Value::List(items) => null_safe_list_member(&obj, items, field),
                     Value::Object(map, source) => {
                         if let Some(message) = poisoned_member_error(source.as_deref(), field) {
                             return Err(Error::Eval(message));
@@ -691,7 +690,12 @@ impl Evaluator {
                             .ok_or_else(|| {
                                 Error::Eval(
                                     missing_member_error(&source, obj_expr, &key_str, scope)
-                                        .unwrap_or_else(|| format!("key not found: {key_str}")),
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "Cannot find key `{}`.",
+                                                stdlib::render_value(&key)
+                                            )
+                                        }),
                                 )
                             })
                     }
@@ -700,11 +704,27 @@ impl Evaluator {
                             .ok()
                             .and_then(|index| items.get(index))
                             .cloned()
-                            .ok_or_else(|| Error::Eval(format!("index out of bounds: {index}"))),
-                        _ => Err(Error::Eval("listing index must be an Int".into())),
+                            .ok_or_else(|| {
+                                let message = format!(
+                                    "Element index `{index}` is out of range `0`..`{}`.",
+                                    items.len() as i64 - 1
+                                );
+                                if items.kind() == ListKind::List {
+                                    stdlib::error_with_values(
+                                        message,
+                                        &[("Collection", &Value::List(items.clone()))],
+                                    )
+                                } else {
+                                    Error::Eval(message)
+                                }
+                            }),
+                        _ => Err(stdlib::operator_not_defined(
+                            "[]",
+                            &Value::List(items.clone()),
+                            &key,
+                        )),
                     },
-                    Value::List(_) => Err(Error::Eval("cannot index Set".into())),
-                    _ => Err(Error::Eval("cannot index non-object".into())),
+                    other => Err(stdlib::operator_not_defined("[]", &other, &key)),
                 }
             }
             Expr::Call(func_expr, args) => self.eval_call(func_expr, args, scope, depth),
@@ -1314,6 +1334,35 @@ fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
         .bound_by_alias(name)
         .then(|| type_alias_value(name, scope))
         .flatten()
+}
+
+/// `list?.name` on a non-null list, set or listing.
+#[inline(never)]
+fn null_safe_list_member(list: &Value, items: &ListValue, name: &str) -> Result<Value> {
+    if items.kind() == ListKind::Dynamic {
+        return Err(Error::Eval(format!(
+            "Cannot find property `{name}` in object of type `Dynamic`."
+        )));
+    }
+    list_property(list, items, name).unwrap_or_else(|| {
+        Err(Error::Eval(format!(
+            "cannot access field '{name}' on {}",
+            value_type_name(list)
+        )))
+    })
+}
+
+/// A built-in property of a list, set or listing, or `None` when `name` is not
+/// one. Shared by `.` and `?.` access.
+#[inline(never)]
+fn list_property(list: &Value, items: &ListValue, name: &str) -> Option<Result<Value>> {
+    Some(match name {
+        "length" => Ok(Value::Int(items.len() as i64)),
+        "isEmpty" => Ok(Value::Bool(items.is_empty())),
+        "first" | "last" | "single" | "rest" | "firstOrNull" | "lastOrNull" | "singleOrNull"
+        | "restOrNull" | "lastIndex" => list_element_member(list, items, name),
+        _ => return None,
+    })
 }
 
 /// The member `name` of `list`, a list or set (`items` are its elements).

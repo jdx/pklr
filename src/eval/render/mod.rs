@@ -1013,6 +1013,15 @@ pub(crate) trait StringRenderer<'a> {
         map: &ObjectMap,
         source: Option<&ObjectSource>,
     ) -> Result<()> {
+        // The module-wide failed-member check cannot match a path converter,
+        // so it is made here, as in the JSON conversion walk.
+        if self.walk().converters.has_paths()
+            && let Some(member) = source
+                .and_then(|source| source.poisoned_members.as_ref())
+                .and_then(|members| members.values().find(|member| member.rendered))
+        {
+            return Err(Error::Eval(member.message.clone()));
+        }
         self.start_object(kind)?;
         let previous = self.walk().enclosing.replace(kind);
         let members = Members::new(kind, source);

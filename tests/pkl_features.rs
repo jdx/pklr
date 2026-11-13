@@ -67,6 +67,8 @@ mod dynamic;
 mod get_class;
 #[path = "pkl_features/imports.rs"]
 mod imports;
+#[path = "pkl_features/null_safe.rs"]
+mod null_safe;
 #[path = "pkl_features/numbers.rs"]
 mod numbers;
 #[path = "pkl_features/objects.rs"]

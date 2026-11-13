@@ -1215,11 +1215,51 @@ impl Evaluator {
                 Entry::Spread(e) => {
                     let val = self.eval_expr(e, &entry_scope, depth + 1)?;
                     check_iterable(&val)?;
-                    if let Value::List(_) = val {
-                        return Err(Error::Eval(
-                            "Cannot spread value of type `List` into object of type `Mapping`."
-                                .into(),
-                        ));
+                    if let Value::List(items) = &val
+                        && !(items.kind() == ListKind::Dynamic && items.is_empty())
+                    {
+                        return Err(match items.kind() {
+                            ListKind::Listing | ListKind::Dynamic => Error::Eval(
+                                "Cannot spread object containing elements into object of type \
+                                 `Mapping`."
+                                    .into(),
+                            ),
+                            _ => stdlib::error_with_values(
+                                format!(
+                                    "Cannot spread value of type `{}` into object of type \
+                                     `Mapping`.",
+                                    pkl_class_name(&val)
+                                ),
+                                &[("Value", &val)],
+                            ),
+                        });
+                    }
+                    if let Value::Object(m, Some(source)) = &val
+                        && source.kind != ObjectKind::Mapping
+                        && !m.is_empty()
+                    {
+                        // A `Dynamic` may hold only entries, which spread.
+                        let entries_only_kind = source.kind == ObjectKind::Dynamic
+                            || (source.kind == ObjectKind::Object && source.type_name.is_none());
+                        let has_properties = !entries_only_kind
+                            || source
+                                .evaluated_properties
+                                .iter()
+                                .any(|name| declares_property(&source.entries, name));
+                        if has_properties {
+                            return Err(Error::Eval(
+                                "Cannot spread object containing properties into object of type \
+                                 `Mapping`."
+                                    .into(),
+                            ));
+                        }
+                        if !source.elements.is_empty() {
+                            return Err(Error::Eval(
+                                "Cannot spread object containing elements into object of type \
+                                 `Mapping`."
+                                    .into(),
+                            ));
+                        }
                     }
                     if let Value::Object(m, _) = val {
                         for (key, value) in m.iter() {
@@ -1362,4 +1402,22 @@ fn reads_mapping_default(expr: &Expr) -> bool {
         expr,
         Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..)
     )
+}
+
+/// Whether a body declares a non-local property `name`, directly or in a
+/// `when` or `for` generator.
+fn declares_property(entries: &[Entry], name: &str) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::Property(prop) => {
+            prop.name.as_ref() == name && !has_modifier(&prop.modifiers, Modifier::Local)
+        }
+        Entry::WhenGenerator(w) => {
+            declares_property(&w.body, name)
+                || w.else_body
+                    .as_ref()
+                    .is_some_and(|b| declares_property(b, name))
+        }
+        Entry::ForGenerator(f) => declares_property(&f.body, name),
+        _ => false,
+    })
 }
