@@ -1860,3 +1860,20 @@ res = (m) { [k] { foo = 2 } }
     );
     assert_eq!(json["res"]["a"]["foo"], 2);
 }
+
+#[test]
+fn mapping_amendment_computed_keys_see_the_bodys_bindings() {
+    let json = eval(
+        r#"
+class Foo { names: Listing<String> }
+local m = Map("a", new Foo { names { "orig" } }).toMapping()
+res = (m) { local k = "a"; [k] { names { "new" } } }
+res2 = (m) { when (false) { [throw("unused")] {} } }
+"#,
+    );
+    assert_eq!(
+        json["res"]["a"]["names"],
+        serde_json::json!(["orig", "new"])
+    );
+    assert_eq!(json["res2"]["a"]["names"], serde_json::json!(["orig"]));
+}
