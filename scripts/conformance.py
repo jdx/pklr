@@ -130,6 +130,12 @@ SKIP_ERRORS = re.compile(
 # The subset that only says JSON can't represent the value; the text route
 # applies to these. The rest (network, project, missing module) skip both.
 RENDER_ERRORS = re.compile(r"Cannot render|as JSON")
+# What still skips the text route: problems outside the evaluator. A render
+# error there is a real result, so pklr must reject it too.
+EXTERNAL_ERRORS = re.compile(
+    r"no project found|Exception when making request|"
+    r"Cannot find module|Cannot find resource|I/O error"
+)
 
 
 def pkl_message(stderr):
@@ -168,7 +174,7 @@ def check_text(path, exe, timeout):
     prc, pout, perr = run(["pkl", "eval", path], timeout, binary=True)
     if prc is None:
         return "skipped", "pkl timed out"
-    if prc != 0 and SKIP_ERRORS.search(perr):
+    if prc != 0 and EXTERNAL_ERRORS.search(perr):
         return "skipped", pkl_message(perr)
     rrc, rout, rerr = run([str(exe), path], timeout, binary=True)
     if rrc is None:

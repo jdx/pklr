@@ -14,7 +14,7 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::lexer;
-use crate::parser::{self, Entry, Expr, Modifier, Module, Property, TypeExpr};
+use crate::parser::{Entry, Expr, Modifier, Module, Property, TypeExpr};
 use crate::value::{ListKind, ListValue, ObjectMap, ObjectSource, Value};
 
 /// The `pkl:base` classes pklr provides, as Pkl source. Their methods
@@ -200,7 +200,7 @@ impl Evaluator {
             return Ok(Some(template.clone()));
         }
         let tokens = lexer::lex_named(BASE_CLASSES, "pkl:base")?;
-        let module = parser::parse_named(&tokens, BASE_CLASSES, "pkl:base")?;
+        let module = self.parse_registered(&tokens, BASE_CLASSES, "pkl:base")?;
         let Some((class_mods, body)) = module.body.iter().find_map(|entry| match entry {
             Entry::ClassDef(class_name, mods, _, body) if class_name == name => Some((mods, body)),
             _ => None,
@@ -230,7 +230,7 @@ impl Evaluator {
             return Ok(module.clone());
         }
         let tokens = lexer::lex_named(source, key)?;
-        let module = parser::parse_named(&tokens, source, key)?;
+        let module = self.parse_registered(&tokens, source, key)?;
         let value = self.eval_module_with_scope(&module, Path::new(key), depth + 1, None, None)?;
         self.builtin_classes.insert(key, value.clone());
         Ok(value)
