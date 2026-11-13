@@ -329,6 +329,9 @@ pub(crate) struct CapturedScope {
 pub(crate) struct ModuleAnnotations {
     pub properties: Vec<(Arc<str>, Vec<crate::parser::Annotation>)>,
     pub scope: CapturedScope,
+    /// The annotations the module or class this one amends or extends
+    /// declares, evaluated in their own scope and applied first.
+    pub parent: Option<Arc<ModuleAnnotations>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -32,6 +32,10 @@ class Resource {
   base64: String
 }
 
+// The `render` function is left undeclared: a subclass overriding an inherited
+// property does not yet see its own sibling members from the override.
+open class ConvertProperty {}
+
 class PcfRenderer {
   extension = "pcf"
   indent: String = "  "
@@ -80,6 +84,7 @@ pub(super) const BUILTIN_CLASS_NAMES: &[&str] = &[
     "ModuleOutput",
     "RenderDirective",
     "Resource",
+    "ConvertProperty",
     "PcfRenderer",
     "JsonRenderer",
     "YamlRenderer",
@@ -835,12 +840,19 @@ impl Evaluator {
         // As `pkl eval -f json`: null properties and mapping entries are
         // omitted unless the evaluated renderer sets `omitNullProperties`
         // to false.
-        let omit_nulls = render::Settings::read(kind, &renderer)?.omit_null_properties;
+        let settings = render::Settings::read(kind, &renderer)?;
+        // Without an `output.renderer`, `pkl eval -f json` renders with a
+        // `JsonRenderer`, which is what annotations see.
+        let annotation_renderer = match render::renderer_kind(&settings.renderer) {
+            Some(_) => settings.renderer.clone(),
+            None => super::stdlib::typed_object("JsonRenderer", ObjectMap::default()),
+        };
         render::to_json(
             &value,
             top_kind,
             &converters,
-            omit_nulls,
+            settings.omit_null_properties,
+            Some((&annotation_renderer, &settings.property_transformers)),
             &mut Invoker(self, 0),
         )
     }

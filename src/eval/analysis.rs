@@ -80,6 +80,15 @@ fn index_reads_key(alias: &str) -> String {
     format!("{alias}\0[]")
 }
 
+/// The instance an annotation writes, for what it names and reads.
+fn annotation_instance(annotation: &crate::parser::Annotation) -> Expr {
+    Expr::New(
+        Some(annotation.name.clone()),
+        Arc::new(annotation.body.clone()),
+        Vec::new(),
+    )
+}
+
 pub(super) fn import_field_uses(entries: &[Entry]) -> HashMap<String, ImportUse> {
     let mut uses = HashMap::default();
     let shadows = HashSet::default();
@@ -105,6 +114,13 @@ pub(super) fn collect_entry_import_field_uses(
                 }
                 if let Some(body) = &prop.body {
                     collect_entry_import_field_uses(body, uses, &entry_shadows);
+                }
+                for annotation in &prop.annotations {
+                    collect_expr_import_field_uses(
+                        &annotation_instance(annotation),
+                        uses,
+                        &entry_shadows,
+                    );
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
@@ -2435,6 +2451,15 @@ fn collect_entry_refs_unnarrowed(
                 }
                 if let Some(body) = &prop.body {
                     collect_entry_refs_in(body, refs, &entry_shadows, aliases, definitions);
+                }
+                for annotation in &prop.annotations {
+                    collect_expr_refs_in(
+                        &annotation_instance(annotation),
+                        refs,
+                        &entry_shadows,
+                        aliases,
+                        definitions,
+                    );
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {

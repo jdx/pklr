@@ -18,7 +18,17 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
+        let mut parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
+        // A builtin class with no binding in scope is the parent itself, so
+        // its name reaches the subclass's `parent_type_names` and a
+        // converter keyed on it matches the subclass.
+        if parent_val.is_none()
+            && let Some(name) = parent_name
+            && !name.contains('.')
+            && super::output::BUILTIN_CLASS_NAMES.contains(&name)
+        {
+            parent_val = self.builtin_class(name)?;
+        }
         if let Some(parent_name) = parent_name {
             check_supertype(scope, class_name, parent_name, parent_val.as_ref())?;
         }
@@ -190,45 +200,38 @@ impl Evaluator {
                         let child_entries = std::mem::take(&mut src.entries);
                         let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
                         // An annotation on a property the parent declares also
-                        // applies to the child's override, ahead of its own.
+                        // applies to the child's override, ahead of its own,
+                        // and is evaluated where the parent declared it.
                         let inherited_annotations: Vec<(Name, Vec<crate::parser::Annotation>)> =
                             psrc.entries
                                 .iter()
                                 .filter_map(|entry| match entry {
-                                    Entry::Property(p)
-                                        if !p.annotations.is_empty()
-                                            && child_names.contains(&p.name) =>
-                                    {
-                                        Some((p.name.clone(), p.annotations.clone()))
+                                    Entry::Property(p) if child_names.contains(&p.name) => {
+                                        let annotations: Vec<_> = p
+                                            .annotations
+                                            .iter()
+                                            .filter(|annotation| annotation.name != "Deprecated")
+                                            .cloned()
+                                            .collect();
+                                        (!annotations.is_empty())
+                                            .then(|| (p.name.clone(), annotations))
                                     }
                                     _ => None,
                                 })
                                 .collect();
+                        if !inherited_annotations.is_empty() || psrc.module_annotations.is_some() {
+                            src.module_annotations =
+                                Some(Arc::new(crate::value::ModuleAnnotations {
+                                    properties: inherited_annotations.clone(),
+                                    scope: (*parent_scope).clone(),
+                                    parent: psrc.module_annotations.clone(),
+                                }));
+                        }
                         let mut prepared_child: Vec<(Entry, Option<Arc<CapturedScope>>)> =
                             Vec::new();
                         for (entry_index, entry) in
                             Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
                         {
-                            let entry = match entry {
-                                Entry::Property(prop)
-                                    if inherited_annotations
-                                        .iter()
-                                        .any(|(name, _)| *name == prop.name) =>
-                                {
-                                    let mut prop = Arc::unwrap_or_clone(prop);
-                                    let mut annotations: Vec<_> = inherited_annotations
-                                        .iter()
-                                        .filter(|(name, _)| *name == prop.name)
-                                        .flat_map(|(_, annotations)| annotations.iter())
-                                        .filter(|annotation| annotation.name != "Deprecated")
-                                        .cloned()
-                                        .collect();
-                                    annotations.append(&mut prop.annotations);
-                                    prop.annotations = annotations;
-                                    Entry::Property(Arc::new(prop))
-                                }
-                                entry => entry,
-                            };
                             prepared_child.push((
                                 entry,
                                 child_entry_scopes.get(entry_index).cloned().unwrap_or(None),

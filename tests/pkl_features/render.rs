@@ -2016,3 +2016,113 @@ fn amending_a_module_does_not_repeat_the_elements_of_an_inherited_member() {
         "{\n  \"o\": [\n    \"p\",\n    \"q\"\n  ]\n}\n"
     );
 }
+
+#[cfg(feature = "native-io")]
+fn annotated_modules(name: &str, files: &[(&str, &str)]) -> (TestTempDir, std::path::PathBuf) {
+    let dir = TestTempDir::new(name);
+    for (file, src) in files {
+        std::fs::write(dir.path().join(file), src).unwrap();
+    }
+    let path = dir.path().join("main.pkl");
+    (dir, path)
+}
+
+#[cfg(feature = "native-io")]
+const NAMES: (&str, &str) = ("names.pkl", "label = \"renamed\"\n");
+
+#[cfg(feature = "native-io")]
+#[test]
+fn import_used_only_in_a_property_annotation_is_bound() {
+    let (_dir, path) = annotated_modules(
+        "pklr_render_annotation_import",
+        &[
+            NAMES,
+            (
+                "main.pkl",
+                "import \"pkl:json\"\nimport \"names.pkl\"\n@json.Property { name = names.label }\nx = 1\noutput { renderer = new JsonRenderer {} }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        pklr::eval_to_text(&path).unwrap(),
+        "{\n  \"renamed\": 1\n}\n"
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn module_property_annotations_are_inherited_through_amends() {
+    let (_dir, path) = annotated_modules(
+        "pklr_render_annotation_amends",
+        &[
+            NAMES,
+            (
+                "base.pkl",
+                "import \"pkl:json\"\nimport \"names.pkl\"\n@json.Property { name = names.label }\nx = 1\n",
+            ),
+            (
+                "main.pkl",
+                "amends \"base.pkl\"\nx = 2\noutput { renderer = new JsonRenderer {} }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        pklr::eval_to_text(&path).unwrap(),
+        "{\n  \"renamed\": 2\n}\n"
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn inherited_class_annotation_keeps_its_declaring_scope() {
+    // `names` is imported by the declaring module only.
+    let (_dir, path) = annotated_modules(
+        "pklr_render_annotation_class_scope",
+        &[
+            NAMES,
+            (
+                "base.pkl",
+                "import \"pkl:json\"\nimport \"names.pkl\"\nopen class P { @json.Property { name = names.label } a: Int = 1 }\n",
+            ),
+            (
+                "main.pkl",
+                "import \"base.pkl\"\nclass Q extends base.P { a = 5 }\noutput { renderer = new JsonRenderer {}; value = new Q {} }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        pklr::eval_to_text(&path).unwrap(),
+        "{\n  \"renamed\": 5\n}\n"
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn json_conversion_applies_property_annotations() {
+    let (_dir, path) = annotated_modules(
+        "pklr_render_annotation_json",
+        &[
+            NAMES,
+            (
+                "main.pkl",
+                "import \"pkl:json\"\nimport \"names.pkl\"\nclass C { @json.Property { name = names.label } a: Int = 1; b: Int = 2 }\n@json.Property { name = \"zed\" }\nx = 3\nc = new C {}\n",
+            ),
+        ],
+    );
+    let expected = serde_json::json!({"zed": 3, "c": {"renamed": 1, "b": 2}});
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), expected);
+}
+
+#[test]
+fn convert_property_transformer_matches_a_subclass() {
+    let json = eval(
+        r#"class Up extends ConvertProperty {
+  render = (prop, renderer) -> Pair(prop.first.toUpperCase(), prop.second)
+}
+class C { @Up a: Int = 1 }
+res = new JsonRenderer {
+  convertPropertyTransformers { [ConvertProperty] = new { render = (prop, r) -> Pair("T" + prop.first, prop.second) } }
+}.renderValue(new C {})"#,
+    );
+    assert_eq!(json["res"], "{\n  \"Ta\": 1\n}");
+}

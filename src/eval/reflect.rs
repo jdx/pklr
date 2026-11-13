@@ -820,36 +820,36 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Vec<Value>> {
         let mut annotations = Vec::new();
-        if let Some(module) = &source.module_annotations {
-            let scope = super::scope::restore_scope(&module.scope);
-            for (_, list) in module.properties.iter().filter(|(n, _)| &**n == name) {
-                for annotation in list {
-                    let expr = Expr::New(
-                        Some(annotation.name.clone()),
-                        Arc::new(annotation.body.clone()),
-                        Vec::new(),
-                    );
-                    annotations.push(self.eval_expr(&expr, &scope, depth + 1)?);
-                }
+        // What a module or class inherits comes first, each annotation
+        // evaluated where its declaration is.
+        let mut chain = Vec::new();
+        let mut next = source.module_annotations.as_ref();
+        while let Some(level) = next {
+            chain.push(level);
+            next = level.parent.as_ref();
+        }
+        for level in chain.into_iter().rev() {
+            let scope = super::scope::restore_scope(&level.scope);
+            for (_, list) in level.properties.iter().filter(|(n, _)| &**n == name) {
+                annotations.extend(self.eval_annotations(list, &scope, depth)?);
             }
-            return Ok(annotations);
         }
         let scope = definition_type_scope(source);
-        for entry in source.entries.iter() {
+        for (index, entry) in source.entries.iter().enumerate() {
             let Entry::Property(prop) = entry else {
                 continue;
             };
             if &*prop.name != name {
                 continue;
             }
-            for annotation in &prop.annotations {
-                let expr = Expr::New(
-                    Some(annotation.name.clone()),
-                    Arc::new(annotation.body.clone()),
-                    Vec::new(),
-                );
-                annotations.push(self.eval_expr(&expr, &scope, depth + 1)?);
-            }
+            // An entry copied from a parent keeps the scope it was declared in.
+            let declared = source
+                .entry_scopes
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(|captured| super::scope::restore_scope(captured));
+            let scope = declared.as_ref().unwrap_or(&scope);
+            annotations.extend(self.eval_annotations(&prop.annotations, scope, depth)?);
         }
         Ok(annotations)
     }

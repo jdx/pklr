@@ -897,51 +897,14 @@ impl<'a> Walk<'a> {
         name: &Arc<str>,
         value: &Value,
     ) -> Result<Option<(Arc<str>, Value)>> {
-        let annotations = self.invoke.property_annotations(source, name)?;
-        let mut converted: Option<(Arc<str>, Value)> = None;
-        for annotation in annotations {
-            let annotation = match self
-                .property_transformers
-                .find(&annotation, Kind::Typed, &[])
-            {
-                Some(transformer) => {
-                    let transformer = transformer.clone();
-                    self.invoke.invoke(&transformer, annotation)?
-                }
-                None => annotation,
-            };
-            let Value::Object(members, _) = &annotation else {
-                continue;
-            };
-            let Some(render @ Value::Lambda(..)) = members.get("render") else {
-                continue;
-            };
-            let (key, value) = match &converted {
-                Some((key, value)) => (key.clone(), value.clone()),
-                None => (name.clone(), value.clone()),
-            };
-            let mut pair = ObjectMap::default();
-            pair.insert("first".into(), Value::String(key));
-            pair.insert("second".into(), value);
-            let pair = super::stdlib::typed_object("Pair", pair);
-            let result = self
-                .invoke
-                .invoke_all(render, &[pair, self.renderer.clone()])?;
-            let rendered = match &result {
-                Value::Object(pair, _) => pair.get("first").zip(pair.get("second")),
-                _ => None,
-            };
-            match rendered {
-                Some((Value::String(key), value)) => converted = Some((key.clone(), value.clone())),
-                _ => {
-                    return Err(Error::Eval(format!(
-                        "Expected value of type `Pair<String, Any>`, but got `{}`.",
-                        display_value(&result)
-                    )));
-                }
-            }
-        }
-        Ok(converted)
+        apply_property_annotations(
+            &mut *self.invoke,
+            self.property_transformers,
+            self.renderer,
+            source,
+            name,
+            value,
+        )
     }
 
     /// The kind of `value`, honoring the top-level override once.
@@ -1142,13 +1105,7 @@ pub(crate) trait StringRenderer<'a> {
             )));
         }
         // Only an instance of a class can have annotated properties.
-        let annotated_source = source.filter(|source| {
-            source.module_annotations.is_some()
-                || (source.type_identity.is_some()
-                    && source.entries.iter().any(
-                        |entry| matches!(entry, Entry::Property(prop) if !prop.annotations.is_empty()),
-                    ))
-        });
+        let annotated_source = source.filter(|source| has_annotated_properties(source));
         let mut is_first = true;
         for (member, key, value) in ordered {
             match member {
@@ -1645,6 +1602,69 @@ pub(crate) fn java_double_to_string(value: f64) -> String {
     }
 }
 
+/// Whether the properties of `source` can carry `ConvertProperty`
+/// annotations: only an instance of a class, or a module, can.
+fn has_annotated_properties(source: &ObjectSource) -> bool {
+    source.module_annotations.is_some()
+        || (source.type_identity.is_some()
+            && source.entries.iter().any(
+                |entry| matches!(entry, Entry::Property(prop) if !prop.annotations.is_empty()),
+            ))
+}
+
+/// Apply the `ConvertProperty` annotations of the property `name` of an
+/// instance of the class `source` describes, as `renderer` renders it, to
+/// `value`. `None` if it has none.
+fn apply_property_annotations(
+    invoke: &mut dyn Invoke,
+    transformers: &Converters,
+    renderer: &Value,
+    source: &ObjectSource,
+    name: &Arc<str>,
+    value: &Value,
+) -> Result<Option<(Arc<str>, Value)>> {
+    let annotations = invoke.property_annotations(source, name)?;
+    let mut converted: Option<(Arc<str>, Value)> = None;
+    for annotation in annotations {
+        let annotation = match transformers.find(&annotation, Kind::Typed, &[]) {
+            Some(transformer) => {
+                let transformer = transformer.clone();
+                invoke.invoke(&transformer, annotation)?
+            }
+            None => annotation,
+        };
+        let Value::Object(members, _) = &annotation else {
+            continue;
+        };
+        let Some(render @ Value::Lambda(..)) = members.get("render") else {
+            continue;
+        };
+        let (key, value) = match &converted {
+            Some((key, value)) => (key.clone(), value.clone()),
+            None => (name.clone(), value.clone()),
+        };
+        let mut pair = ObjectMap::default();
+        pair.insert("first".into(), Value::String(key));
+        pair.insert("second".into(), value);
+        let pair = super::stdlib::typed_object("Pair", pair);
+        let result = invoke.invoke_all(render, &[pair, renderer.clone()])?;
+        let rendered = match &result {
+            Value::Object(pair, _) => pair.get("first").zip(pair.get("second")),
+            _ => None,
+        };
+        match rendered {
+            Some((Value::String(key), value)) => converted = Some((key.clone(), value.clone())),
+            _ => {
+                return Err(Error::Eval(format!(
+                    "Expected value of type `Pair<String, Any>`, but got `{}`.",
+                    display_value(&result)
+                )));
+            }
+        }
+    }
+    Ok(converted)
+}
+
 /// Convert a module's output value to JSON for [`crate::eval_to_json`],
 /// applying `converters` and refusing what Pkl's `JsonRenderer` refuses.
 /// Null properties and entries are dropped when `omit_nulls` (the renderer
@@ -1656,6 +1676,7 @@ pub(crate) fn to_json(
     top_kind: Option<Kind>,
     converters: &Converters,
     omit_nulls: bool,
+    annotations: Option<(&Value, &Converters)>,
     invoke: &mut dyn Invoke,
 ) -> Result<serde_json::Value> {
     let mut state = JsonValue {
@@ -1664,6 +1685,7 @@ pub(crate) fn to_json(
         path: Vec::new(),
         track_path: converters.has_paths(),
         omit_nulls,
+        annotations,
         memo: Default::default(),
     };
     state.push(PathPart::TopLevel);
@@ -1686,6 +1708,7 @@ pub(crate) fn to_json(
         path: Vec::new(),
         track_path: false,
         omit_nulls,
+        annotations: None,
         memo: Default::default(),
     };
     render.value(&converted, kind)
@@ -1705,6 +1728,7 @@ pub(crate) fn convert_value(
         path: Vec::new(),
         track_path: converters.has_paths(),
         omit_nulls: false,
+        annotations: None,
         memo: Default::default(),
     };
     state.push(PathPart::TopLevel);
@@ -1728,6 +1752,9 @@ struct JsonValue<'a> {
     /// Whether null members are left out (`to_json` only).
     #[cfg_attr(not(feature = "native-io"), allow(dead_code))]
     omit_nulls: bool,
+    /// The renderer and its `convertPropertyTransformers`, to apply the
+    /// `ConvertProperty` annotations of properties (`to_json` only).
+    annotations: Option<(&'a Value, &'a Converters)>,
     /// Converted objects and lists by address (see
     /// [`JsonValue::convert_member`]), each kept with its original so the
     /// address is not reused while the memo is alive.
@@ -1853,7 +1880,11 @@ impl JsonValue<'_> {
                 {
                     return Err(Error::Eval(member.message.clone()));
                 }
-                let members = (self.track_path || converts_keys)
+                let annotated_source = match (self.annotations, source.as_deref()) {
+                    (Some(_), Some(source)) if has_annotated_properties(source) => Some(source),
+                    _ => None,
+                };
+                let members = (self.track_path || converts_keys || annotated_source.is_some())
                     .then(|| Members::new(kind, source.as_deref()));
                 let mut changed: Option<ObjectMap> = None;
                 for (index, (key, member)) in map.iter().enumerate() {
@@ -1862,6 +1893,34 @@ impl JsonValue<'_> {
                         self.convert_entry_key(key)?
                     } else {
                         None
+                    };
+                    // A property annotation renames and converts the member
+                    // before the converters see it.
+                    let mut annotated_member = None;
+                    if let (
+                        Some(source),
+                        Some((renderer, transformers)),
+                        Some(MemberKind::Property),
+                    ) = (annotated_source, self.annotations, member_kind)
+                        && !member.is_unrendered_member(key, Some(source))
+                        && let Some((renamed, value)) = apply_property_annotations(
+                            &mut *self.invoke,
+                            transformers,
+                            renderer,
+                            source,
+                            key,
+                            member,
+                        )?
+                    {
+                        annotated_member = Some((renamed, value));
+                    }
+                    let new_key = match &annotated_member {
+                        Some((renamed, _)) if renamed != key => Some(renamed.clone()),
+                        _ => new_key,
+                    };
+                    let member = match &annotated_member {
+                        Some((_, value)) => value,
+                        None => member,
                     };
                     if self.track_path {
                         let key = new_key.clone().unwrap_or_else(|| key.clone());
@@ -1880,7 +1939,9 @@ impl JsonValue<'_> {
                         self.convert_member(member)?
                     };
                     self.pop();
-                    if changed.is_none() && (converted.is_some() || new_key.is_some()) {
+                    if changed.is_none()
+                        && (converted.is_some() || new_key.is_some() || annotated_member.is_some())
+                    {
                         let mut new_map =
                             ObjectMap::with_capacity_and_hasher(map.len(), Default::default());
                         new_map.extend(map.iter().take(index).map(|(k, v)| (k.clone(), v.clone())));

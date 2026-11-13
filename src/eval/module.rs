@@ -526,19 +526,22 @@ impl Evaluator {
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
         // What the annotations of a class or type alias read counts as used.
         analysis_entries.extend(self.declaration_annotation_entries(module));
-        let mut referenced_imports = referenced_roots(&analysis_entries);
-        referenced_imports.extend(inherited_references);
         // A renderer applies the annotations of the module's own properties,
-        // whether or not the requested fields reach those properties.
+        // whether or not the requested fields reach those properties, so
+        // what they name and read counts as used.
         for entry in module.body.iter() {
             if let Entry::Property(prop) = entry {
                 for annotation in &prop.annotations {
-                    if let Some(root) = annotation.name.split('.').next() {
-                        referenced_imports.insert(nm(root));
-                    }
+                    analysis_entries.push(Entry::Elem(Expr::New(
+                        Some(annotation.name.clone()),
+                        Arc::new(annotation.body.clone()),
+                        Vec::new(),
+                    )));
                 }
             }
         }
+        let mut referenced_imports = referenced_roots(&analysis_entries);
+        referenced_imports.extend(inherited_references);
         let import_field_uses = import_field_uses(&analysis_entries);
 
         let mut inherited_local_paths: Vec<PathBuf> = Vec::new();
@@ -1122,12 +1125,21 @@ impl Evaluator {
                 _ => None,
             })
             .collect();
-        let module_annotations = (!annotated.is_empty()).then(|| {
-            Arc::new(crate::value::ModuleAnnotations {
+        // The annotations of the module this one amends or extends apply
+        // first, evaluated in that module's own scope.
+        let inherited_annotations = self
+            .parent_module_key(module, path)
+            .and_then(|parent| self.module_scopes.get(&parent))
+            .and_then(|base| base.annotations.clone());
+        let module_annotations = if annotated.is_empty() {
+            inherited_annotations
+        } else {
+            Some(Arc::new(crate::value::ModuleAnnotations {
                 properties: annotated,
                 scope: super::scope::capture_scope(&scope),
-            })
-        });
+                parent: inherited_annotations,
+            }))
+        };
         let source = if deprecated.is_empty()
             && poisoned_members.is_empty()
             && !is_abstract
@@ -1154,7 +1166,7 @@ impl Evaluator {
                 declared_as: None,
                 poisoned_members: (!poisoned_members.is_empty())
                     .then(|| Arc::new(poisoned_members)),
-                module_annotations,
+                module_annotations: module_annotations.clone(),
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
                 is_module: true,
@@ -1220,6 +1232,7 @@ impl Evaluator {
                 exported_types,
                 module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
+                annotations: module_annotations.clone(),
             },
         );
         // An imported module whose failed property this output renders fails
