@@ -3519,3 +3519,18 @@ d = map as Map
     );
     assert_eq!(json["d"], serde_json::json!({"1": "one"}));
 }
+
+#[test]
+fn class_default_may_read_a_sibling_without_a_default() {
+    let json = eval(
+        r#"
+class App {
+  m: Int
+  x = m + 1
+}
+res = new App { m = 3 }
+"#,
+    );
+    assert_eq!(json["res"]["m"], 3);
+    assert_eq!(json["res"]["x"], 4);
+}

@@ -1774,6 +1774,28 @@ impl Evaluator {
                 }
             }
             if !recovered_property {
+                // A read of a sibling declared without a value (`m: Int`)
+                // cannot resolve until an instance supplies it; the member
+                // stays in the source and is evaluated then.
+                let valueless = |message: &str| {
+                    message
+                        .strip_prefix("Cannot find property `")
+                        .and_then(|rest| rest.strip_suffix("`."))
+                        .is_some_and(|name| {
+                            cx.entries.iter().any(|entry| {
+                                matches!(entry, Entry::Property(p)
+                                    if &*p.name == name
+                                        && p.value.is_none()
+                                        && p.body.is_none()
+                                        && !has_modifier(&p.modifiers, Modifier::Local))
+                            })
+                        })
+                };
+                st.failed_properties
+                    .retain(|(_, message)| !valueless(message));
+                if st.failed_properties.is_empty() {
+                    break;
+                }
                 return Err(Error::Eval(st.failed_properties[0].1.clone()));
             }
         }
