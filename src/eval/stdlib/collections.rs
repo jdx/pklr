@@ -119,6 +119,13 @@ impl Evaluator {
                 let [initial, operator] = args else {
                     return Err(arity_error(2, args));
                 };
+                if !matches!(operator, Value::Lambda(..)) {
+                    return Err(Error::Eval(format!(
+                        "Expected value of type `Function3`, but got type `{}`.\nValue: {}",
+                        operator.type_name(),
+                        display_value(operator)
+                    )));
+                }
                 let mut acc = initial.clone();
                 for (key, value) in map {
                     let key = entry_key(self, key);
@@ -200,10 +207,7 @@ impl Evaluator {
                 let [other] = args else {
                     return Err(arity_error(1, args));
                 };
-                let Value::List(other) = other else {
-                    return Err(type_mismatch("Collection", other));
-                };
-                let other: &[Value] = other;
+                let other: &[Value] = collection_arg(other)?;
                 let aligned = if name == "startsWith" {
                     slice.get(..other.len())
                 } else {
@@ -584,9 +588,7 @@ impl Evaluator {
                 let [other] = args else {
                     return Err(arity_error(1, args));
                 };
-                let Value::List(other) = other else {
-                    return Err(type_mismatch("Collection", other));
-                };
+                let other = collection_arg(other)?;
                 same(
                     slice
                         .iter()
@@ -599,8 +601,9 @@ impl Evaluator {
                 let [other] = args else {
                     return Err(arity_error(1, args));
                 };
-                let Value::List(other) = other else {
-                    return Err(type_mismatch("Set", other));
+                let other = match other {
+                    Value::List(set) if set.kind() == ListKind::Set => set,
+                    other => return Err(type_mismatch("Set", other)),
                 };
                 let keep = name == "intersect";
                 same(
@@ -762,6 +765,23 @@ fn lambda_arg(args: &[Value], params: usize) -> Result<&Value> {
             other.type_name(),
             display_value(other)
         ))),
+    }
+}
+
+/// The `List` or `Set` a method takes as an argument or a function returns.
+/// `Listing`, `IntSeq` and `Dynamic` are lists here but not collections.
+pub(in crate::eval) fn collection_arg(value: &Value) -> Result<&ListValue> {
+    match value {
+        Value::List(items)
+            if matches!(items.kind(), ListKind::List | ListKind::Set) && !items.is_int_seq() =>
+        {
+            Ok(items)
+        }
+        Value::List(items) if items.is_int_seq() => Err(super::error_with_values(
+            "Expected value of type `Collection`, but got type `IntSeq`.",
+            &[("Value", value)],
+        )),
+        other => Err(type_mismatch("Collection", other)),
     }
 }
 

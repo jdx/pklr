@@ -556,7 +556,7 @@ impl Evaluator {
                     (
                         Value::Object(map, Some(source)),
                         "bytes" | "md5" | "sha1" | "sha256" | "sha256Int",
-                    ) if source.type_name.as_deref() == Some("Resource") => {
+                    ) if source.type_identity.as_deref() == Some("pkl:base#Resource") => {
                         if let Some(result) = stdlib::resource_property(map, field) {
                             return result;
                         }
@@ -666,6 +666,18 @@ impl Evaluator {
                     }
                     _ if self.stdlib_property(&obj, field).is_some() => {
                         self.stdlib_property(&obj, field).unwrap()
+                    }
+                    Value::Object(map, Some(source))
+                        if source.type_identity.as_deref() == Some("pkl:base#Resource")
+                            && matches!(
+                                field.as_str(),
+                                "bytes" | "md5" | "sha1" | "sha256" | "sha256Int"
+                            ) =>
+                    {
+                        match stdlib::resource_property(map, field) {
+                            Some(result) => result,
+                            None => Ok(Value::Null),
+                        }
                     }
                     Value::List(items) => null_safe_list_member(&obj, items, field),
                     Value::Object(map, source) => {

@@ -1015,13 +1015,27 @@ impl Evaluator {
         let mut expanded = Vec::with_capacity(entries.len());
         // An index the amendment defines twice, by `[0]` and a predicate or by
         // two predicates, is a conflicting override.
-        let mut defined: std::collections::HashSet<i64> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::DynProperty(Expr::Int(index), _) => Some(*index),
-                _ => None,
-            })
-            .collect();
+        let mut defined: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for entry in entries.iter() {
+            if let Entry::DynProperty(index, _) = entry {
+                // An index written as an expression, such as `[1 - 1]`, counts
+                // by its value; one that fails is reported where it is defined.
+                let index = match index {
+                    Expr::Int(index) => Some(*index),
+                    other => match self.eval_expr(other, scope, depth + 1) {
+                        Ok(Value::Int(index)) => Some(index),
+                        _ => None,
+                    },
+                };
+                if let Some(index) = index
+                    && !defined.insert(index)
+                {
+                    return Err(Error::Eval(format!(
+                        "Duplicate definition of member `{index}`."
+                    )));
+                }
+            }
+        }
         for entry in entries.iter() {
             let Entry::Predicate(cond, value) = entry else {
                 expanded.push(entry.clone());

@@ -613,10 +613,7 @@ impl Evaluator {
                 let mut result = Vec::new();
                 for item in items.iter() {
                     let val = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
-                    let Value::List(inner) = val else {
-                        return Err(stdlib::type_mismatch("Collection", &val));
-                    };
-                    result.extend(inner.iter().cloned());
+                    result.extend(stdlib::collection_arg(&val)?.iter().cloned());
                 }
                 Ok(Some(collection_result(items.kind(), result)))
             }

@@ -218,3 +218,59 @@ lookahead = Regex("a(?=b)").findMatchesIn("ab").length
     assert_eq!(json["named"], true);
     assert_eq!(json["lookahead"], 1);
 }
+
+#[test]
+fn collection_arguments_and_resource_identity() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local lst = new Listing { 1 }
+local dyn = new Dynamic { 1 }
+startsWithListing = test.catch(() -> List(1).startsWith(lst))
+startsWithIntSeq = test.catch(() -> List(1).startsWith(IntSeq(1, 1)))
+startsWithDynamic = test.catch(() -> List(1).startsWith(dyn))
+zipListing = test.catch(() -> List(1).zip(lst))
+flatMapIntSeq = test.catch(() -> List(1).flatMap((x) -> IntSeq(1, 2)))
+intersectList = test.catch(() -> Set(1).intersect(List(1)))
+intersectListing = test.catch(() -> Set(1).intersect(lst))
+foldNotFunction = test.catch(() -> Map().fold(0, 1))
+dupPredicate = test.catch(() -> new Listing { 1; 2 } { [[this == 1]] = 5; [1 - 1] = 6 })
+"#,
+    );
+    let message = |kind: &str, got: &str| {
+        let first = json[kind].as_str().unwrap().to_string();
+        assert!(first.contains(got), "{kind}: {first}");
+    };
+    message("startsWithListing", "`Collection`, but got type `Listing`");
+    message("startsWithIntSeq", "`Collection`, but got type `IntSeq`");
+    message("startsWithDynamic", "`Collection`, but got type `Dynamic`");
+    message("zipListing", "`Collection`, but got type `Listing`");
+    message("flatMapIntSeq", "`Collection`, but got type `IntSeq`");
+    message("intersectList", "`Set`, but got type `List`");
+    message("intersectListing", "`Set`, but got type `Listing`");
+    message("foldNotFunction", "`Function3`, but got type `Int`");
+    assert_eq!(json["dupPredicate"], "Duplicate definition of member `0`.");
+}
+
+#[test]
+fn null_safe_resource_digests_and_user_resource_classes() {
+    let dir = std::env::temp_dir().join(format!("pklr-resource-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("data.txt");
+    std::fs::write(&file, "abc").unwrap();
+    let json = eval(&format!(
+        r#"
+class Resource {{ text: String = "abc"; base64: String = "x" }}
+dot = read("file://{path}").md5
+safe = read?("file://{path}")?.md5
+size = read?("file://{path}")?.bytes.size
+user = new Resource {{}}.hasProperty("md5")
+"#,
+        path = file.display()
+    ));
+    assert_eq!(json["dot"], "900150983cd24fb0d6963f7d28e17f72");
+    assert_eq!(json["safe"], json["dot"]);
+    assert_eq!(json["size"], "3.b");
+    assert_eq!(json["user"], false);
+    std::fs::remove_dir_all(dir).ok();
+}
