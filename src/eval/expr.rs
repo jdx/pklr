@@ -580,9 +580,7 @@ impl Evaluator {
                     // A `Class` has the members of `Class`, not those of the
                     // class it stands for.
                     Value::Object(map, source) => {
-                        if let Some(message) = poisoned_member_error(source.as_deref(), field)
-                            .or_else(|| class_property_error(source.as_deref(), field))
-                        {
+                        if let Some(message) = member_read_error(source.as_deref(), field) {
                             return Err(Error::Eval(message));
                         }
                         let hidden = || {
@@ -634,9 +632,7 @@ impl Evaluator {
                     }
                     Value::List(items) => null_safe_list_member(&obj, items, field),
                     Value::Object(map, source) => {
-                        if let Some(message) = poisoned_member_error(source.as_deref(), field)
-                            .or_else(|| class_property_error(source.as_deref(), field))
-                        {
+                        if let Some(message) = member_read_error(source.as_deref(), field) {
                             return Err(Error::Eval(message));
                         }
                         if !map.contains_key(field.as_str())
@@ -1421,4 +1417,11 @@ fn class_property_error(source: Option<&ObjectSource>, field: &str) -> Option<St
     Some(format!(
         "Cannot find property `{field}` in object of type `Class`."
     ))
+}
+
+/// The error a read of `field` on an object with this source raises before the
+/// member is looked up, if any.
+#[inline(never)]
+fn member_read_error(source: Option<&ObjectSource>, field: &str) -> Option<String> {
+    poisoned_member_error(source, field).or_else(|| class_property_error(source, field))
 }
