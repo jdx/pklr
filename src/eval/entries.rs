@@ -644,6 +644,7 @@ impl Evaluator {
             this_source,
             failed_locals,
             failed_properties,
+            deferred_undefined: IndexMap::new(),
             non_const_members,
             bound_members,
             inherited_seeded,
@@ -800,7 +801,8 @@ impl Evaluator {
             elements: st.elements,
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
-            poisoned_members: None,
+            poisoned_members: (!st.deferred_undefined.is_empty())
+                .then(|| Arc::new(std::mem::take(&mut st.deferred_undefined))),
             declared_as: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
@@ -1825,31 +1827,61 @@ impl Evaluator {
                 // A read of a sibling declared without a value (`m: Int`)
                 // cannot resolve until an instance supplies it; the member
                 // stays in the source and is evaluated then.
+                // The valueless sibling a failure reads: whether it is hidden.
                 let valueless = |message: &str| {
                     message
                         .strip_prefix("Cannot find property `")
                         .and_then(|rest| rest.strip_suffix("`."))
-                        .is_some_and(|name| {
-                            cx.entries.iter().any(|entry| {
-                                matches!(entry, Entry::Property(p)
+                        .and_then(|name| {
+                            cx.entries.iter().find_map(|entry| match entry {
+                                Entry::Property(p)
                                     if &*p.name == name
                                         && p.value.is_none()
                                         && p.body.is_none()
-                                        && !has_modifier(&p.modifiers, Modifier::Local))
+                                        && !has_modifier(&p.modifiers, Modifier::Local) =>
+                                {
+                                    Some((
+                                        p.name.clone(),
+                                        has_modifier(&p.modifiers, Modifier::Hidden),
+                                    ))
+                                }
+                                _ => None,
                             })
                         })
                 };
                 // Only a class's defaults and its instances wait for a member
                 // to be supplied; an ordinary object has nothing to supply it.
-                if self
+                let template = self
                     .class_template_bodies
-                    .contains(&(Arc::as_ptr(cx.entries) as usize))
+                    .contains(&(Arc::as_ptr(cx.entries) as usize));
+                if template
                     || cx.inherited_source.is_some_and(|source| {
                         source.type_name.is_some() || source.type_identity.is_some()
                     })
                 {
-                    st.failed_properties
-                        .retain(|(_, message)| !valueless(message));
+                    for (entry_index, message) in std::mem::take(&mut st.failed_properties) {
+                        let Some((sibling, hidden)) = valueless(&message) else {
+                            st.failed_properties.push((entry_index, message));
+                            continue;
+                        };
+                        // A hidden sibling is not reported as undefined later,
+                        // so an instance's member that read it keeps the error.
+                        if hidden
+                            && !template
+                            && let Entry::Property(prop) = &cx.entries[entry_index]
+                            && !has_modifier(&prop.modifiers, Modifier::Hidden)
+                            && !has_modifier(&prop.modifiers, Modifier::Local)
+                        {
+                            self.rendered_member_failed = true;
+                            st.deferred_undefined.insert(
+                                prop.name.clone(),
+                                PoisonedMember {
+                                    message: undefined_property_message(&sibling),
+                                    rendered: true,
+                                },
+                            );
+                        }
+                    }
                 }
                 if st.failed_properties.is_empty() {
                     break;
@@ -1989,6 +2021,10 @@ struct BodyState<'a> {
     failed_locals: Vec<usize>,
     /// Value properties that failed while a local was pending.
     failed_properties: Vec<(usize, String)>,
+    /// Members of a class instance that read a hidden property left undefined,
+    /// with the read's error. They stay out of the object and raise it when
+    /// read or rendered.
+    deferred_undefined: IndexMap<Name, PoisonedMember>,
     /// The members a const local may not read.
     non_const_members: HashSet<Name>,
     bound_members: HashSet<Name>,

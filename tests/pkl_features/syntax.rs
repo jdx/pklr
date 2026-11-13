@@ -3689,3 +3689,19 @@ result = (base) { m = 3 }
     );
     assert_eq!(json["result"]["x"], 4);
 }
+
+#[test]
+fn deferred_member_reports_the_property_it_read() {
+    let err =
+        eval_fails("class App { hidden a: Int; hidden b: Int; x = b + 1 }\nr = new App {}.x\n");
+    assert!(err.contains("property `b`"), "{err}");
+    let err = eval_fails("class App { hidden a: Int; c: Int; x = c + 1 }\nr = new App { a = 1 }\n");
+    assert!(err.contains("property `c`"), "{err}");
+    let err = eval_fails(
+        "class App { hidden a: Int; c: Int; x = c + 1; y = a }\nr = new App { c = 1 }\n",
+    );
+    assert!(err.contains("property `a`"), "{err}");
+    let json =
+        eval("class App { hidden a: Int; hidden b: Int; x = b + 1 }\nr = new App { b = 1 }\n");
+    assert_eq!(json["r"]["x"], 2);
+}
