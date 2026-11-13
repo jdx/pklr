@@ -636,6 +636,9 @@ fn type_has_constraint(
             // arguments are not visited. Otherwise the arguments decide.
             match expand_alias(name, args, aliases) {
                 Some(body) => type_has_constraint(&body, aliases, depth + 1, budget),
+                // Too large to expand: stay silent rather than reject a type
+                // whose arguments the alias may discard.
+                None if aliases.contains_key(name.as_str()) => false,
                 None => args
                     .iter()
                     .any(|arg| type_has_constraint(arg, aliases, depth + 1, budget)),
