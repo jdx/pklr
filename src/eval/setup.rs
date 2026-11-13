@@ -130,6 +130,7 @@ impl Evaluator {
             scope_keys: HashMap::default(),
             layered_scopes: HashMap::default(),
             rendered_member_failed: false,
+            module_arg_members: HashMap::default(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             capabilities: Box::new(capabilities),
