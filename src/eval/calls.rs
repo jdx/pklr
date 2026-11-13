@@ -234,10 +234,11 @@ impl Evaluator {
             let mut call_scope = Scope::for_call(&captured);
             // If we're inside a method call context (scope has `this` as an Object),
             // layer the instance's properties so local functions see overridden values
-            if let Some(Value::Object(this_map, _)) = scope.get("this") {
+            if let Some(this @ Value::Object(this_map, _)) = scope.get("this") {
                 for (k, v) in this_map.iter() {
                     call_scope.set(k, v.clone());
                 }
+                rebind_module_this(&mut call_scope, this, &captured);
             }
             // Bind arguments to parameters
             let mut evaled_args = Vec::new();
@@ -703,6 +704,130 @@ impl Evaluator {
         self.eval_expr(body, &call_scope, depth + 1)
     }
 
+    /// `super.method(args)`: the inherited method runs on the receiver, so
+    /// what it reads is late bound rather than fixed to the parent's defaults.
+    /// `None` when `super` has no such method to run that way.
+    #[inline(never)]
+    pub(super) fn eval_super_or_call(
+        &mut self,
+        func_expr: &Expr,
+        args: &[Expr],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        if let Expr::Field(obj_expr, method) = func_expr
+            && matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super")
+            && let Some(result) = self.eval_super_call(method, args, scope, depth)?
+        {
+            return Ok(*result);
+        }
+        self.eval_call(func_expr, args, scope, depth)
+    }
+
+    #[inline(never)]
+    fn eval_super_call(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<Box<Value>>> {
+        let Some(Value::Object(map, source)) = scope.get("super") else {
+            return Ok(None);
+        };
+        let function = match source {
+            Some(source) => {
+                let declared = source.entries.iter().any(|entry| {
+                    matches!(entry, Entry::Property(prop)
+                        if &*prop.name == method
+                            && !has_modifier(&prop.modifiers, Modifier::Local)
+                            && matches!(prop.value, Some(Expr::Lambda(..))))
+                });
+                if !declared {
+                    return Ok(None);
+                }
+                let function = self.eval_super_member(method, scope, depth + 1, false)?;
+                if !matches!(function, Value::Lambda(..)) {
+                    return Ok(None);
+                }
+                function
+            }
+            // A module's `super` is a plain view of its base's members.
+            None => {
+                if !matches!(scope.get("this"), Some(Value::Object(_, None)))
+                    && (map.is_empty() || scope.get(SUPER_MODULE_NAME).is_none())
+                {
+                    return Ok(None);
+                }
+                match map.get(method) {
+                    Some(function @ Value::Lambda(..)) => function.clone(),
+                    Some(_) => return Ok(None),
+                    None => {
+                        let Some(Value::String(module)) = scope.get(SUPER_MODULE_NAME) else {
+                            return Ok(None);
+                        };
+                        return Err(Error::Eval(format!(
+                            "Cannot find method `{method}` in module `{module}`."
+                        )));
+                    }
+                }
+            }
+        };
+        let mut evaled_args = Vec::new();
+        for a in args {
+            evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
+        }
+        if source.is_some() {
+            self.apply_function(&function, &evaled_args, scope, depth)
+        } else {
+            self.apply_late_bound(&function, &evaled_args, scope, depth)
+        }
+        .map(|v| Some(Box::new(v)))
+    }
+
+    /// Call a module's function on the module of `caller` (its `this`), whose
+    /// members replace the ones the function captured.
+    fn apply_late_bound(
+        &mut self,
+        function: &Value,
+        args: &[Value],
+        caller: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let Value::Lambda(params, body, captured) = function else {
+            return Err(Error::Eval("expected a function".into()));
+        };
+        if params.len() != args.len() {
+            return Err(Error::Eval(format!(
+                "Expected {} function arguments but got {}.",
+                params.len(),
+                args.len()
+            )));
+        }
+        if let Some(message) = self.lambda_guard_error(captured) {
+            return Err(Error::Eval(message.to_string()));
+        }
+        let mut call_scope = Scope::for_call(captured);
+        if let Some(this @ Value::Object(this_map, _)) = caller.get("this") {
+            // Only the base's members late bind: a `local` of the declaring
+            // module is lexical, and a same-named child member leaves it be.
+            let base = match caller.get("super") {
+                Some(Value::Object(base, _)) => Some(base),
+                _ => None,
+            };
+            for (k, v) in this_map.iter() {
+                if base.is_none_or(|base| base.contains_key(k)) {
+                    call_scope.set(k, v.clone());
+                }
+            }
+            call_scope.set("this", this.clone());
+        }
+        for (param, arg) in params.iter().zip(args) {
+            call_scope.declare(param, arg.clone());
+        }
+        self.eval_expr(body, &call_scope, depth + 1)
+    }
+
     /// `Function.applyToList` accepts a `List`, but not the distinct `Listing`
     /// and `Set` collection kinds.
     pub(super) fn apply_to_list(
@@ -927,5 +1052,16 @@ impl Evaluator {
                 render::display_value(&other)
             ))),
         }
+    }
+}
+
+/// A module's function runs on the module that calls it, which may extend the
+/// module that declared it.
+#[inline(never)]
+fn rebind_module_this(call_scope: &mut Scope, this: &Value, captured: &ScopeMap) {
+    if matches!(this, Value::Object(_, None))
+        && matches!(captured.get("this"), Some(Value::Object(_, None)))
+    {
+        call_scope.set("this", this.clone());
     }
 }
