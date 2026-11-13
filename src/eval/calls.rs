@@ -44,36 +44,10 @@ impl Evaluator {
                 .reflect_call(method, arg_exprs, args, scope, depth)
                 .map(Box::new);
         }
-        // A `Class` has the methods of `Class`, not those of the class it
-        // stands for.
-        if source.kind == ObjectKind::Class
-            && !stdlib::is_module_class(source)
-            && (source.entries.is_empty()
-                || !source
-                    .type_identity
-                    .as_deref()
-                    .is_some_and(|identity| identity.starts_with("pkl:")))
-            && !matches!(receiver, Expr::Ident(name) if matches!(name.as_str(), "super" | "this" | "module"))
-            && !matches!(method, "getClass" | "toString" | "hashCode")
-        {
+        if is_class_method_miss(receiver, source, method) {
             return Some(Box::new(Err(class_method_error(method))));
         }
         None
-    }
-
-    /// `receiver?.method(args)` on a non-null receiver that may be a `Class` or
-    /// the `pkl:reflect` module: it resolves as `receiver.method(args)` does.
-    #[inline(never)]
-    fn null_safe_special_call(
-        &mut self,
-        receiver: &Expr,
-        method: &str,
-        args: &[Expr],
-        scope: &Scope,
-        depth: usize,
-    ) -> Result<Value> {
-        let call = Expr::Field(Box::new(receiver.clone()), method.to_string());
-        self.eval_call(&call, args, scope, depth)
     }
 
     pub(super) fn eval_call(
@@ -182,6 +156,11 @@ impl Evaluator {
             if is_null_value(&obj) {
                 return Ok(Value::Null);
             }
+            if matches!(&obj, Value::Object(_, Some(source))
+                if is_class_method_miss(obj_expr, source, method))
+            {
+                return Err(class_method_error(method));
+            }
             let mut evaled_args = Vec::new();
             for a in args {
                 evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
@@ -196,11 +175,6 @@ impl Evaluator {
                     }
                     _ => {}
                 }
-            }
-            if matches!(&obj, Value::Object(_, Some(source))
-                if source.kind == ObjectKind::Class || source.type_identity.is_some())
-            {
-                return self.null_safe_special_call(obj_expr, method, args, scope, depth);
             }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
@@ -1012,4 +986,19 @@ impl Evaluator {
 #[inline(never)]
 fn class_method_error(method: &str) -> Error {
     Error::Eval(format!("Cannot find method `{method}` in class `Class`."))
+}
+
+/// Whether `method` is one a `Class` value does not have: a `Class` has the
+/// methods of `Class`, not those of the class it stands for.
+#[inline(never)]
+fn is_class_method_miss(receiver: &Expr, source: &ObjectSource, method: &str) -> bool {
+    source.kind == ObjectKind::Class
+        && !stdlib::is_module_class(source)
+        && (source.entries.is_empty()
+            || !source
+                .type_identity
+                .as_deref()
+                .is_some_and(|identity| identity.starts_with("pkl:")))
+        && !matches!(receiver, Expr::Ident(name) if matches!(name.as_str(), "super" | "this" | "module"))
+        && !matches!(method, "getClass" | "toString" | "hashCode")
 }
