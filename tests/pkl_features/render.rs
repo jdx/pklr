@@ -1892,3 +1892,14 @@ res2 = (m) { [k] { foo = 2 } }["b"].names
     assert_eq!(json["res"], 2);
     assert_eq!(json["res2"], serde_json::json!(["x"]));
 }
+
+#[test]
+fn pcf_renders_object_list_and_regex_mapping_keys_as_values() {
+    let text = render(
+        r#"new PcfRenderer {}.renderValue(new Mapping { [Pair(1, "a")] = 1; [Regex("b+")] = 2; [List(1, 2)] = 3 })"#,
+    );
+    assert_eq!(
+        text,
+        "{\n  [Pair(1, \"a\")] = 1\n  [Regex(\"b+\")] = 2\n  [List(1, 2)] = 3\n}"
+    );
+}

@@ -1089,7 +1089,13 @@ pub(crate) trait StringRenderer<'a> {
                         if self.rejects_compound_keys()
                             && raw_key.starts_with(crate::value::MAPPING_KEY_PREFIX)
                             && is_non_string_key(raw_key)
-                            && matches!(key_value(raw_key), Value::String(_))
+                            && matches!(
+                                key_value(raw_key),
+                                Value::String(_)
+                                    | Value::Object(..)
+                                    | Value::List(_)
+                                    | Value::Regex(_)
+                            )
                         {
                             return Err(cannot_render_non_string_key(&key_value(raw_key), "JSON"));
                         }
@@ -1253,7 +1259,31 @@ fn map_key_display(key: &Arc<str>, depth: usize, max: usize) -> String {
     }
     match class_key_name(key) {
         Some(name) => name.rsplit(['#', ':']).next().unwrap_or(name).to_string(),
-        None => display_value_at(&key_value(key), depth + 1, max),
+        None => match key_value(key) {
+            // A key is a value in its own right, so its members are shown.
+            Value::Object(map, source)
+                if matches!(
+                    kind_of(&Value::Object(map.clone(), source.clone())),
+                    Kind::Dynamic | Kind::Typed
+                ) && !map.is_empty()
+                    && map.keys().all(|name| !name.starts_with('\0')) =>
+            {
+                let name = source
+                    .as_deref()
+                    .and_then(ObjectSource::type_name)
+                    .unwrap_or("Dynamic");
+                let members = map
+                    .iter()
+                    .filter(|(_, member)| !matches!(member, Value::Lambda(..)))
+                    .map(|(name, member)| {
+                        format!("{name} = {}", display_value_at(member, depth + 2, max))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!("new {name} {{ {members} }}")
+            }
+            key => display_value_at(&key, depth + 1, max),
+        },
     }
 }
 

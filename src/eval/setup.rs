@@ -321,6 +321,7 @@ impl Evaluator {
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
         self.active_typed_defaults.clear();
         self.mapping_key_values.clear();
+        crate::value::clear_compound_keys();
         self.module_names.clear();
         self.module_path_admitted.clear();
     }

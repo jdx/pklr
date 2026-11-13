@@ -23,7 +23,32 @@ pub(crate) const MAPPING_KEY_PREFIX: &str = "\0pklr:mapping-key:";
 // This ID is internal-only: the stored key still renders from `display`.
 static NEXT_NAN_MAPPING_KEY: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    /// The values behind object, list and regex mapping keys, by storage key,
+    /// so a renderer can show a key as the value it stands for. Cleared when
+    /// an evaluation begins.
+    static COMPOUND_KEYS: std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, Value>> =
+        std::cell::RefCell::default();
+}
+
+/// Forgets the values remembered for compound mapping keys.
+pub(crate) fn clear_compound_keys() {
+    COMPOUND_KEYS.with(|keys| keys.borrow_mut().clear());
+}
+
 pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
+    let key = mapping_storage_key_of(value)?;
+    if matches!(value, Value::Object(..) | Value::List(_) | Value::Regex(_)) {
+        COMPOUND_KEYS.with(|keys| {
+            keys.borrow_mut()
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        });
+    }
+    Some(key)
+}
+
+fn mapping_storage_key_of(value: &Value) -> Option<Arc<str>> {
     let (kind, identity, display) = match value {
         Value::String(_) => return None,
         Value::Null => ("null", "0000000000000000".to_string(), "null".to_string()),
@@ -113,6 +138,7 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
                 .to_json()
                 .to_string(),
         ),
+        Value::Regex(regex) => ("regex", regex.pattern().to_string(), format!("{value:?}")),
         other => (
             "display",
             "0000000000000000".to_string(),
@@ -215,6 +241,9 @@ pub(crate) fn display_storage_key(key: &str) -> &str {
 }
 
 pub(crate) fn mapping_storage_value(key: &str) -> Value {
+    if let Some(value) = COMPOUND_KEYS.with(|keys| keys.borrow().get(key).cloned()) {
+        return value;
+    }
     let Some(key) = key.strip_prefix(MAPPING_KEY_PREFIX) else {
         return Value::String(key.into());
     };
