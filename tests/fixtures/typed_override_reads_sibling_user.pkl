@@ -1,0 +1,4 @@
+import "typed_override_reads_sibling.pkl" as m
+
+amended = (m.k) { dirs = List("b") }
+base = m.k

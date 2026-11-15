@@ -1813,3 +1813,14 @@ fn test_imported_class_method_names_its_own_class() {
     assert_eq!(json["takes_self"], "f");
     assert_eq!(json["constructed"], "c");
 }
+
+/// An override of a typed parent property that reads a hidden member of its
+/// class sees the amended value when an instance is amended.
+#[test]
+fn test_amended_instance_rereads_members_an_inherited_override_reads() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/typed_override_reads_sibling_user.pkl");
+    let json = pklr::eval_to_json(&path).unwrap();
+    assert_eq!(json["base"]["tests"]["t"], "a/r");
+    assert_eq!(json["amended"]["tests"]["t"], "b/r");
+}
