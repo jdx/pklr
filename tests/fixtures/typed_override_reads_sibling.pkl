@@ -1,0 +1,19 @@
+module typed_override_reads_sibling
+
+class Item {
+  write: Mapping<String, String>?
+}
+
+open class Base {
+  tests: Mapping<String, String> = new Mapping {}
+}
+
+class K extends Base {
+  hidden dirs: List<String> = List("a")
+  hidden dir: String = "\(dirs.first)/"
+  tests {
+    ["t"] = "\(dir)r"
+  }
+}
+
+k = new K {}

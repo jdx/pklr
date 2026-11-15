@@ -471,6 +471,19 @@ impl Evaluator {
             .map(|module_scope| value_is_class_type(val, member, &module_scope).unwrap_or(false)))
     }
 
+    /// The class `name` as its defining module binds it, found from the
+    /// class identity (`<module identity>.<name>`) of one of its instances.
+    pub(super) fn defined_class(&mut self, identity: &str, name: &str) -> Option<Value> {
+        let module = identity.strip_suffix(name)?.strip_suffix('.')?;
+        let key = self.module_scope_key(module)?;
+        match self.module_scopes.get(&key)?.values.get(name) {
+            Some(class @ Value::Object(_, Some(source))) if source.kind == ObjectKind::Class => {
+                Some(class.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// The scope of the imported module with the given identity, when it
     /// declares the class `name`.
     fn module_class_scope(&mut self, identity: &str, name: &str) -> Option<Scope> {

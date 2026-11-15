@@ -351,15 +351,29 @@ impl Evaluator {
                             ));
                         }
                         let mut child_used = vec![false; prepared_child.len()];
+                        let child_properties: HashSet<Name> = prepared_child
+                            .iter()
+                            .filter_map(|(entry, _)| match entry {
+                                Entry::Property(c) => Some(c.name.clone()),
+                                _ => None,
+                            })
+                            .collect();
                         for (entry_index, pe) in psrc.entries.iter().enumerate() {
-                            // A child's override keeps the parent member's place.
+                            // A child's override keeps the parent member's place,
+                            // unless it reads a sibling member the child declares:
+                            // an amendment of the instance re-evaluates members in
+                            // order, and one placed ahead of what it reads keeps the
+                            // value it read before the amendment.
                             if let Entry::Property(p) = pe
                                 && child_names.contains(&p.name)
                                 && !has_modifier(&p.modifiers, Modifier::Local)
                                 && let Some(ci) =
                                     prepared_child.iter().enumerate().position(|(i, (e, _))| {
                                         !child_used[i]
-                                            && matches!(e, Entry::Property(c) if c.name == p.name)
+                                            && matches!(e, Entry::Property(c) if c.name == p.name
+                                            && !property_reference_names(c).iter().any(|read| {
+                                                *read != c.name && child_properties.contains(read)
+                                            }))
                                     })
                             {
                                 child_used[ci] = true;

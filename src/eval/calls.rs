@@ -440,6 +440,25 @@ impl Evaluator {
                 call_scope.set(k, v.clone());
             }
             call_scope.set("this", obj.clone());
+            // A method of a class from another module may name its own class
+            // in a signature (`function f(): Self`). The captured scope is the
+            // importer's, so bind the name from the class's definition site.
+            if let Value::Object(_, Some(source)) = obj
+                && let Some(class) = source.type_name.as_deref()
+            {
+                let simple = class.rsplit('.').next().unwrap_or(class);
+                if call_scope.get(simple).is_none()
+                    && let Some(identity) = source.type_identity.as_deref()
+                {
+                    // A nested class is not a top-level binding of its module, so
+                    // it keeps the identity-only class: enough for a signature
+                    // that names it.
+                    let definition = self
+                        .defined_class(identity, simple)
+                        .unwrap_or_else(|| super::stdlib::class_value(class, identity.to_string()));
+                    call_scope.set(simple, definition);
+                }
+            }
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = evaled_args.get(i) {
                     call_scope.declare(param, arg.clone());

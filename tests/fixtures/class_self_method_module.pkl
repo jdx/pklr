@@ -1,0 +1,16 @@
+module class_self_method_module
+class TM {
+  filename: String = "f"
+  function w(n: String): TM = (this) { filename = n }
+  function p(o: TM): String = o.filename
+  function s(n: String): TM = new TM { filename = n }
+}
+
+class Outer {
+  class Inner {
+    v: String = "i"
+    function w(n: String): Inner = (this) { v = n }
+  }
+  inner: Inner = new Inner {}
+}
+holder: Outer = new Outer {}
