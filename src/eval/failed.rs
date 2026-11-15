@@ -17,7 +17,6 @@ fn is_member_failure(error: &Error) -> bool {
     match error {
         Error::Eval(message) => {
             !message.starts_with("undefined variable")
-                && !is_unresolved_name(message)
                 && !message.starts_with("maximum recursion depth")
                 && !message.contains("cancelled")
                 && !message.contains("canceled")
@@ -54,6 +53,10 @@ impl Evaluator {
     pub(super) fn defer_member_error(&mut self, result: Result<Value>) -> Result<Value> {
         match result {
             Err(Error::Eval(message)) if is_member_failure(&Error::Eval(message.clone())) => {
+                if is_unresolved_name(&message) {
+                    self.unresolved_deferred += 1;
+                    self.last_unresolved = message.clone();
+                }
                 self.failed_seen = true;
                 Ok(Value::Failed(message.into()))
             }
@@ -525,8 +528,9 @@ pub(super) fn display_forced(value: &Value) -> String {
 }
 
 /// A bare name that did not resolve (`Cannot find property `x`.`). It can
-/// resolve once a sibling or an enclosing local is declared, so it propagates
-/// to the retry that follows instead of becoming a failed member.
+/// resolve once a sibling or an enclosing local is declared, so it
+/// propagates to the retries of its body until the last one, which makes it a
+/// failed member.
 fn is_unresolved_name(message: &str) -> bool {
     message
         .strip_prefix("Cannot find property `")

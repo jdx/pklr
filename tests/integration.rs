@@ -1839,3 +1839,14 @@ fn test_typed_mapping_member_reads_local_named_like_a_class_property() {
     );
     assert_eq!(json["r"]["tests"]["a"]["expect"]["a.txt"], "formatted\n");
 }
+
+/// A member that names something that never exists stays a failed member, so
+/// reading the collection's length still works.
+#[test]
+fn test_unread_member_naming_a_missing_property_stays_deferred() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/unread_missing_member_defers.pkl");
+    let json = pklr::eval_to_json(&path).unwrap();
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["b"], 2);
+}
