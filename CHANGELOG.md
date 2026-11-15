@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.2](https://github.com/jdx/pklr/compare/v6.0.1...v6.0.2) - 2026-11-15
+
+### Fixed
+
+- *(eval)* keep a typed Mapping member that reads an enclosing local ([#473](https://github.com/jdx/pklr/pull/473))
+
 ## [6.0.1](https://github.com/jdx/pklr/compare/v6.0.0...v6.0.1) - 2026-11-15
 
 ### Fixed
