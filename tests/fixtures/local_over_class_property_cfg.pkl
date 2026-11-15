@@ -1,0 +1,10 @@
+class StepTest {
+  tmpdir: Boolean = false
+  write: Mapping<String, String> = new Mapping<String, String> {}
+  after: String?
+}
+class Step {
+  glob: String?
+  exclude: String?
+  tests: Mapping<String, StepTest> = new Mapping<String, StepTest> {}
+}

@@ -1850,3 +1850,16 @@ fn test_unread_member_naming_a_missing_property_stays_deferred() {
     assert_eq!(json["a"], 1);
     assert_eq!(json["b"], 2);
 }
+
+/// A nested body reads a local of an enclosing scope, not the property a class
+/// declares without a value, also when the step is amended.
+#[test]
+fn test_local_wins_over_a_class_property_declared_without_a_value() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/local_over_class_property.pkl");
+    let json = pklr::eval_to_json(&path).unwrap();
+    assert_eq!(
+        json["amended"]["tests"]["a"]["write"]["a.txt"],
+        "formatted\n"
+    );
+}

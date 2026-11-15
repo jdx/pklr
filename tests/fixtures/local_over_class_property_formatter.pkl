@@ -1,0 +1,12 @@
+import "local_over_class_property_cfg.pkl"
+
+formatter = new local_over_class_property_cfg.Step {
+  glob = "*.txt"
+  tests {
+    local const after = "formatted\n"
+    ["a"] {
+      tmpdir = true
+      write { ["a.txt"] = after }
+    }
+  }
+}

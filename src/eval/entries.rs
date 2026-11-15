@@ -2440,7 +2440,17 @@ fn poison_stale_members(
         if prop.body.is_some() {
             let reads = property_reference_names(prop);
             for name in &cx.stale_members {
-                if *name != prop.name && !st.bound_members.contains(name) && reads.contains(name) {
+                // A property that only declares its type, as a class does, is
+                // no member of the body: a local in an enclosing scope wins.
+                let defined = |entry: &Entry| {
+                    matches!(entry, Entry::Property(p)
+                        if p.name == *name && (p.value.is_some() || p.body.is_some()))
+                };
+                if *name != prop.name
+                    && !st.bound_members.contains(name)
+                    && reads.contains(name)
+                    && body_has(cx.entries, &defined)
+                {
                     active_scope.poison(name.clone(), format!("undefined variable: {name}"));
                 }
             }
