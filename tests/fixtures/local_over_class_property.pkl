@@ -1,0 +1,3 @@
+import "local_over_class_property_formatter.pkl"
+
+amended = (local_over_class_property_formatter.formatter) { exclude = "vendor/**" }
