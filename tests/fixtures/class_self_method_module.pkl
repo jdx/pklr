@@ -3,4 +3,5 @@ class TM {
   filename: String = "f"
   function w(n: String): TM = (this) { filename = n }
   function p(o: TM): String = o.filename
+  function s(n: String): TM = new TM { filename = n }
 }

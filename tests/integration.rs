@@ -1811,4 +1811,5 @@ fn test_imported_class_method_names_its_own_class() {
     let json = pklr::eval_to_json(&path).unwrap();
     assert_eq!(json["renamed"], "b");
     assert_eq!(json["takes_self"], "f");
+    assert_eq!(json["constructed"], "c");
 }

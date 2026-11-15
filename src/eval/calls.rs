@@ -448,9 +448,10 @@ impl Evaluator {
             {
                 let simple = class.rsplit('.').next().unwrap_or(class);
                 if call_scope.get(simple).is_none()
-                    && let Some(identity) = source.type_identity.clone()
+                    && let Some(identity) = source.type_identity.as_deref()
+                    && let Some(definition) = self.defined_class(identity, simple)
                 {
-                    call_scope.set(simple, super::stdlib::class_value(class, identity));
+                    call_scope.set(simple, definition);
                 }
             }
             for (i, param) in params.iter().enumerate() {
