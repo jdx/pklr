@@ -1801,3 +1801,14 @@ fn test_outer_before_single_builtin() {
     }
     assert!(result.is_ok());
 }
+
+/// A method of a class from another module may name its own class in a
+/// signature.
+#[test]
+fn test_imported_class_method_names_its_own_class() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/class_self_method_user.pkl");
+    let json = pklr::eval_to_json(&path).unwrap();
+    assert_eq!(json["renamed"], "b");
+    assert_eq!(json["takes_self"], "f");
+}

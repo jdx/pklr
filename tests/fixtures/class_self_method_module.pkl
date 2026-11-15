@@ -1,0 +1,6 @@
+module class_self_method_module
+class TM {
+  filename: String = "f"
+  function w(n: String): TM = (this) { filename = n }
+  function p(o: TM): String = o.filename
+}

@@ -1,0 +1,6 @@
+import "class_self_method_module.pkl"
+
+local m = new class_self_method_module.TM {}
+
+renamed = m.w("b").filename
+takes_self = m.p(m)

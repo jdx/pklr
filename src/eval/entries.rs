@@ -1160,7 +1160,7 @@ impl Evaluator {
                             .is_some_and(|existing| *existing > entry_index)
                     })
                     .unwrap_or_else(|| st.map.len());
-                st.map.shift_insert(index, prop.name.as_ref().into(), value);
+                shift_insert_at(&mut st.map, index, prop.name.as_ref().into(), value);
             } else {
                 st.map.insert(prop.name.as_ref().into(), value);
             }

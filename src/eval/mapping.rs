@@ -67,7 +67,25 @@ pub(super) fn props_shift_insert(
     value: Value,
 ) {
     release_this_aliases(scope, aliases);
-    Arc::make_mut(properties).shift_insert(index, key.into(), value.into_entry_value());
+    shift_insert_at(
+        Arc::make_mut(properties),
+        index,
+        key.into(),
+        value.into_entry_value(),
+    );
+}
+
+/// Place `key` at `index`, counted over the map as it stands before the call.
+/// `IndexMap::shift_insert` panics when an existing key is moved to `len`, so
+/// an existing entry is removed first and the index adjusted for the removal.
+pub(super) fn shift_insert_at(map: &mut ObjectMap, mut index: usize, key: Arc<str>, value: Value) {
+    if let Some(old) = map.get_index_of(&key) {
+        map.shift_remove_index(old);
+        if old < index {
+            index -= 1;
+        }
+    }
+    map.shift_insert(index.min(map.len()), key, value);
 }
 
 /// Insert a receiver member while preserving Mapping key identity for `this`
@@ -1481,4 +1499,48 @@ fn declares_property(entries: &[Entry], name: &str) -> bool {
         Entry::ForGenerator(f) => declares_property(&f.body, name),
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(keys: &[&str]) -> ObjectMap {
+        keys.iter()
+            .enumerate()
+            .map(|(i, k)| (Arc::from(*k), Value::Int(i as i64)))
+            .collect()
+    }
+
+    fn keys(map: &ObjectMap) -> Vec<&str> {
+        map.keys().map(|k| &**k).collect()
+    }
+
+    #[test]
+    fn shift_insert_at_existing_last_key_to_len_does_not_panic() {
+        let mut m = map(&["a", "b", "c"]);
+        shift_insert_at(&mut m, 3, "c".into(), Value::Int(9));
+        assert_eq!(keys(&m), ["a", "b", "c"]);
+        assert!(matches!(m.get("c"), Some(Value::Int(9))));
+    }
+
+    #[test]
+    fn shift_insert_at_moves_existing_key_over_the_original_indexes() {
+        // Moving `a` before `c`: `c` is at index 2 before the call.
+        let mut m = map(&["a", "b", "c"]);
+        shift_insert_at(&mut m, 2, "a".into(), Value::Int(9));
+        assert_eq!(keys(&m), ["b", "a", "c"]);
+        // Moving `c` before `a`.
+        let mut m = map(&["a", "b", "c"]);
+        shift_insert_at(&mut m, 0, "c".into(), Value::Int(9));
+        assert_eq!(keys(&m), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn shift_insert_at_places_a_new_key() {
+        let mut m = map(&["a", "b"]);
+        shift_insert_at(&mut m, 2, "z".into(), Value::Int(9));
+        shift_insert_at(&mut m, 0, "y".into(), Value::Int(9));
+        assert_eq!(keys(&m), ["y", "a", "b", "z"]);
+    }
 }
