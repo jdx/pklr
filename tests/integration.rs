@@ -1825,3 +1825,17 @@ fn test_amended_instance_rereads_members_an_inherited_override_reads() {
     assert_eq!(json["base"]["tests"]["t"], "a/r");
     assert_eq!(json["amended"]["tests"]["t"], "b/r");
 }
+
+/// A member of a typed `Mapping` reads a local declared in the same body, even
+/// when the member's class has a property of that name.
+#[test]
+fn test_typed_mapping_member_reads_local_named_like_a_class_property() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/typed_mapping_member_reads_local.pkl");
+    let json = pklr::eval_to_json(&path).unwrap();
+    assert_eq!(
+        json["formatter"]["tests"]["a"]["write"]["a.txt"],
+        "formatted\n"
+    );
+    assert_eq!(json["r"]["tests"]["a"]["expect"]["a.txt"], "formatted\n");
+}

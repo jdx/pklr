@@ -17,6 +17,7 @@ fn is_member_failure(error: &Error) -> bool {
     match error {
         Error::Eval(message) => {
             !message.starts_with("undefined variable")
+                && !is_unresolved_name(message)
                 && !message.starts_with("maximum recursion depth")
                 && !message.contains("cancelled")
                 && !message.contains("canceled")
@@ -521,4 +522,14 @@ pub(super) fn display_forced(value: &Value) -> String {
         }
         other => crate::eval::render::display_value(other),
     }
+}
+
+/// A bare name that did not resolve (`Cannot find property `x`.`). It can
+/// resolve once a sibling or an enclosing local is declared, so it propagates
+/// to the retry that follows instead of becoming a failed member.
+fn is_unresolved_name(message: &str) -> bool {
+    message
+        .strip_prefix("Cannot find property `")
+        .and_then(|rest| rest.strip_suffix("`."))
+        .is_some_and(|name| !name.contains('`'))
 }

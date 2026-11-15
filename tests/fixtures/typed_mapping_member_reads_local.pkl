@@ -1,0 +1,21 @@
+class StepTest {
+  write: Mapping<String, String>?
+  after: String?
+  expect: Mapping<String, String>?
+}
+class Step {
+  glob: String?
+  exclude: String?
+  tests: Mapping<String, StepTest> = new Mapping {}
+}
+formatter = new Step {
+  glob = "*.txt"
+  tests {
+    local const after = "formatted\n"
+    ["a"] {
+      write { ["a.txt"] = after }
+      expect { ["a.txt"] = after }
+    }
+  }
+}
+r = formatter
