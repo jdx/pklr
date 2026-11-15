@@ -1493,15 +1493,25 @@ impl Evaluator {
         {
             poison_pending_reads(cx, st, prop, &mut active_scope);
         }
-        let value = match self.eval_property(prop, &active_scope, cx.depth) {
+        let retryable = (prop.value.is_some() || prop.body.is_some())
+            && (!st.failed_locals.is_empty()
+                || cx
+                    .pending_members
+                    .iter()
+                    .any(|name| *name != prop.name && !st.bound_members.contains(name)));
+        let deferred_before = self.unresolved_deferred;
+        let evaluated = self.eval_property(prop, &active_scope, cx.depth);
+        // A member that failed on a bare name may resolve on a retry, so the
+        // property is retried before the failed member is accepted.
+        let evaluated = match evaluated {
+            Ok(_) if retryable && self.unresolved_deferred != deferred_before => {
+                Err(Error::Eval(self.last_unresolved.clone()))
+            }
+            other => other,
+        };
+        let value = match evaluated {
             Ok(value) => value,
-            Err(Error::Eval(message))
-                if (prop.value.is_some() || prop.body.is_some())
-                    && (!st.failed_locals.is_empty()
-                        || cx.pending_members.iter().any(|name| {
-                            *name != prop.name && !st.bound_members.contains(name)
-                        })) =>
-            {
+            Err(Error::Eval(message)) if retryable => {
                 // This body declaration shadows an enclosing or
                 // inherited property even while its local
                 // dependency is unresolved. Keep later members
@@ -1816,7 +1826,18 @@ impl Evaluator {
                     &cx.entry_owners,
                     cx.own_body_scope(),
                 );
-                match self.eval_property(prop, &active_scope, cx.depth) {
+                let deferred_before = self.unresolved_deferred;
+                let evaluated = self.eval_property(prop, &active_scope, cx.depth);
+                let evaluated = match evaluated {
+                    Ok(_)
+                        if !self.defer_unresolved_names
+                            && self.unresolved_deferred != deferred_before =>
+                    {
+                        Err(Error::Eval(self.last_unresolved.clone()))
+                    }
+                    other => other,
+                };
+                match evaluated {
                     Ok(value) => {
                         drop(active_scope);
                         if let Some(value) = value {
@@ -1839,6 +1860,14 @@ impl Evaluator {
                 }
             }
             if !recovered_property {
+                // A bare name that still does not resolve is a failed member
+                // once the retries have run out.
+                if !self.defer_unresolved_names {
+                    self.defer_unresolved_names = true;
+                    let result = self.retry_failed_properties(cx, st);
+                    self.defer_unresolved_names = false;
+                    return result;
+                }
                 // A read of a sibling declared without a value (`m: Int`)
                 // cannot resolve until an instance supplies it; the member
                 // stays in the source and is evaluated then.

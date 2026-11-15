@@ -124,6 +124,14 @@ pub struct Evaluator {
     /// Whether any [`Value::Failed`] member was made, so reads that look for
     /// failed members can be skipped until one exists.
     failed_seen: bool,
+    /// Set for the last retry of a body's failed properties: a bare name
+    /// that still does not resolve then becomes a failed member.
+    defer_unresolved_names: bool,
+    /// How many members failed on a bare name that did not resolve, and the
+    /// last such message. A body retries a property that made one before it
+    /// accepts the failed member.
+    unresolved_deferred: u64,
+    last_unresolved: String,
     /// The last declared property value whose members were coerced, with its
     /// type: the declaration's own check need not walk it again.
     last_coerced: Option<(Value, usize)>,

@@ -53,6 +53,10 @@ impl Evaluator {
     pub(super) fn defer_member_error(&mut self, result: Result<Value>) -> Result<Value> {
         match result {
             Err(Error::Eval(message)) if is_member_failure(&Error::Eval(message.clone())) => {
+                if is_unresolved_name(&message) {
+                    self.unresolved_deferred += 1;
+                    self.last_unresolved = message.clone();
+                }
                 self.failed_seen = true;
                 Ok(Value::Failed(message.into()))
             }
@@ -521,4 +525,15 @@ pub(super) fn display_forced(value: &Value) -> String {
         }
         other => crate::eval::render::display_value(other),
     }
+}
+
+/// A bare name that did not resolve (`Cannot find property `x`.`). It can
+/// resolve once a sibling or an enclosing local is declared, so it
+/// propagates to the retries of its body until the last one, which makes it a
+/// failed member.
+fn is_unresolved_name(message: &str) -> bool {
+    message
+        .strip_prefix("Cannot find property `")
+        .and_then(|rest| rest.strip_suffix("`."))
+        .is_some_and(|name| !name.contains('`'))
 }

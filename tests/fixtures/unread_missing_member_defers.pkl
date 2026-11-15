@@ -1,0 +1,2 @@
+a = (new Listing { doesNotExist }).length
+b = (new Mapping { ["bad"] = missing; ["good"] = 1 }).length
