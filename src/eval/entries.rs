@@ -2449,7 +2449,7 @@ fn poison_stale_members(
                 if *name != prop.name
                     && !st.bound_members.contains(name)
                     && reads.contains(name)
-                    && cx.entries.iter().any(defined)
+                    && body_has(cx.entries, &defined)
                 {
                     active_scope.poison(name.clone(), format!("undefined variable: {name}"));
                 }
