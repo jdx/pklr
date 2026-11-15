@@ -449,8 +449,13 @@ impl Evaluator {
                 let simple = class.rsplit('.').next().unwrap_or(class);
                 if call_scope.get(simple).is_none()
                     && let Some(identity) = source.type_identity.as_deref()
-                    && let Some(definition) = self.defined_class(identity, simple)
                 {
+                    // A nested class is not a top-level binding of its module, so
+                    // it keeps the identity-only class: enough for a signature
+                    // that names it.
+                    let definition = self
+                        .defined_class(identity, simple)
+                        .unwrap_or_else(|| super::stdlib::class_value(class, identity.to_string()));
                     call_scope.set(simple, definition);
                 }
             }
