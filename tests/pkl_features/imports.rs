@@ -1430,6 +1430,30 @@ steps {
 }
 
 #[test]
+fn amended_module_mapping_rejects_an_invalid_constrained_default() {
+    let temp = TestTempDir::new("pklr_test_amended_module_mapping_invalid_default");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class Step { check: String? }
+class Group {}
+steps: Mapping<String, Step(check != null) | Group> = new Mapping<String, Step(check != null)> { ["s0"] {} }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "amends \"Config.pkl\"\nsteps {\n    [\"g\"] = new Group {}\n}\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Expected Mapping entry of type"), "{err}");
+}
+
+#[test]
 fn amended_module_mapping_keeps_the_default_entry_class() {
     let temp = TestTempDir::new("pklr_test_amended_module_mapping_default_class");
     let dir = temp.path();
