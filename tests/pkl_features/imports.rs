@@ -1399,6 +1399,10 @@ steps {
             "typealias Items = Mapping<String, Step | Group>\nsteps: Items = new Mapping<String, Step> {}",
         ),
         (
+            "constrained",
+            "steps: Mapping<String, Step(check != null) | Group> = new Mapping<String, Step(check != null)> { [\"s0\"] { check = \"x\" } }",
+        ),
+        (
             "reversed",
             "steps: Mapping<String, Group | Step> = new Mapping<String, Step> {}",
         ),
