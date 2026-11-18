@@ -1316,6 +1316,63 @@ hooks {
 }
 
 #[test]
+fn amended_module_mapping_uses_declared_union_value_type() {
+    let temp = TestTempDir::new("pklr_test_amended_module_mapping_declared_union");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class Step {
+    check: String?
+}
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+steps: Mapping<String, Step | Group> = new Mapping<String, Step> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Config.pkl"
+steps {
+    ["g"] = new Group {
+        steps {
+            ["s"] = new Step { check = "true" }
+        }
+    }
+    ["plain"] = new Step { check = "echo" }
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(
+        json["steps"],
+        serde_json::json!({
+            "g": {"steps": {"s": {"check": "true"}}},
+            "plain": {"check": "echo"}
+        })
+    );
+
+    // A value outside the declared union is still rejected.
+    std::fs::write(
+        dir.join("bad.pkl"),
+        r#"
+amends "Config.pkl"
+class Other {}
+steps {
+    ["o"] = new Other {}
+}
+"#,
+    )
+    .unwrap();
+    assert!(pklr::eval_to_json(&dir.join("bad.pkl")).is_err());
+}
+
+#[test]
 fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();

@@ -2018,6 +2018,13 @@ pub(super) fn compose_amended_object(
     } else {
         base.clone()
     };
+    // The declared type, not the default's own type arguments, decides what
+    // the amended entries may be: `x: Mapping<String, A | B> = new Mapping<String, A> {}`
+    // accepts a `B` entry.
+    let base = match &type_ann {
+        Some(ty) => declare_mapping_value_types(base, ty),
+        None => base,
+    };
     let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
     // The type arguments of `new Listing<T> { ... }` keep checking the original
     // entries, as pkl does; the overlay's own entries stay outside the check.
@@ -2028,6 +2035,31 @@ pub(super) fn compose_amended_object(
         body: None,
         ..(**prop).clone()
     })
+}
+
+/// Re-type the `new Mapping<K, V> { ... }` that `base` builds with the value
+/// types `ty` declares, when it declares a `Mapping`.
+fn declare_mapping_value_types(base: Expr, ty: &crate::parser::TypeExpr) -> Expr {
+    let names = mapping_value_type_names(ty);
+    if names.is_empty() {
+        return base;
+    }
+    match base {
+        Expr::New(Some(name), body, generics) if name == "Mapping" && generics.len() >= 2 => {
+            let mut declared = vec![generics[0].clone()];
+            declared.extend(names);
+            Expr::New(Some(name), body, declared)
+        }
+        Expr::TemplateLocals(locals, inner) => {
+            Expr::TemplateLocals(locals, Box::new(declare_mapping_value_types(*inner, ty)))
+        }
+        Expr::Binop(BinOp::Add, left, right) => Expr::Binop(
+            BinOp::Add,
+            Box::new(declare_mapping_value_types(*left, ty)),
+            right,
+        ),
+        base => base,
+    }
 }
 
 pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope: &Scope) -> Value {
