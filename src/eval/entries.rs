@@ -111,6 +111,12 @@ impl Evaluator {
                     }
                     self.eval_expr(&inferred, scope, depth)?
                 }
+                // `x: Mapping<K, A | B> = new Mapping<K, A> {} + { ... }`: the
+                // declared type, not the default's own type arguments, decides
+                // what the amended entries may be.
+                Some(ty) if builds_mapping(expr) && matches!(expr, Expr::Binop(BinOp::Add, ..)) => {
+                    self.eval_declared_mapping_amendment(expr, ty, scope, depth)?
+                }
                 _ => self.eval_expr(expr, scope, depth)?,
             };
             if let Some(crate::parser::TypeExpr::Named(ty)) = &prop.type_ann
