@@ -1068,6 +1068,46 @@ impl Evaluator {
         Ok(Arc::new(expanded))
     }
 
+    /// Evaluate a `Mapping` default with amendments layered on it
+    /// (`new Mapping<K, A> { ... } + { ... }`), typing the default by the
+    /// declared type `ty` before each layer is applied. The default keeps its
+    /// own entry template; the declared value types are only added to what
+    /// its entries may be.
+    pub(super) fn eval_declared_mapping_amendment(
+        &mut self,
+        expr: &Expr,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let Expr::Binop(BinOp::Add, left, right) = expr else {
+            return self.eval_expr(expr, scope, depth);
+        };
+        let Some((overlay_entries, locals)) = overlay_body(right) else {
+            return self.eval_expr(expr, scope, depth);
+        };
+        let mut base = if matches!(**left, Expr::Binop(BinOp::Add, ..)) {
+            self.eval_declared_mapping_amendment(left, ty, scope, depth + 1)?
+        } else {
+            self.eval_expr(left, scope, depth + 1)?
+        };
+        // A declared alias of a `Mapping` is read where the declaration is.
+        let resolved = match ty {
+            crate::parser::TypeExpr::Named(_) => resolve_collection_type(ty, scope, 0),
+            _ => None,
+        };
+        apply_mapping_type_annotation(&mut base, Some(resolved.as_ref().unwrap_or(ty)), scope);
+        let overlay_scope = locals.map(|locals| {
+            let mut overlay_scope = scope.child();
+            for (name, value) in locals.0.iter() {
+                overlay_scope.set(name, value.clone());
+            }
+            overlay_scope
+        });
+        let scope = overlay_scope.as_ref().unwrap_or(scope);
+        self.eval_value_amendment(base, overlay_entries, scope, depth)
+    }
+
     pub(super) fn eval_value_amendment(
         &mut self,
         base: Value,
@@ -2018,13 +2058,6 @@ pub(super) fn compose_amended_object(
     } else {
         base.clone()
     };
-    // The declared type, not the default's own type arguments, decides what
-    // the amended entries may be: `x: Mapping<String, A | B> = new Mapping<String, A> {}`
-    // accepts a `B` entry.
-    let base = match &type_ann {
-        Some(ty) => declare_mapping_value_types(base, ty),
-        None => base,
-    };
     let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
     // The type arguments of `new Listing<T> { ... }` keep checking the original
     // entries, as pkl does; the overlay's own entries stay outside the check.
@@ -2035,31 +2068,6 @@ pub(super) fn compose_amended_object(
         body: None,
         ..(**prop).clone()
     })
-}
-
-/// Re-type the `new Mapping<K, V> { ... }` that `base` builds with the value
-/// types `ty` declares, when it declares a `Mapping`.
-fn declare_mapping_value_types(base: Expr, ty: &crate::parser::TypeExpr) -> Expr {
-    let names = mapping_value_type_names(ty);
-    if names.is_empty() {
-        return base;
-    }
-    match base {
-        Expr::New(Some(name), body, generics) if name == "Mapping" && generics.len() >= 2 => {
-            let mut declared = vec![generics[0].clone()];
-            declared.extend(names);
-            Expr::New(Some(name), body, declared)
-        }
-        Expr::TemplateLocals(locals, inner) => {
-            Expr::TemplateLocals(locals, Box::new(declare_mapping_value_types(*inner, ty)))
-        }
-        Expr::Binop(BinOp::Add, left, right) => Expr::Binop(
-            BinOp::Add,
-            Box::new(declare_mapping_value_types(*left, ty)),
-            right,
-        ),
-        base => base,
-    }
 }
 
 pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope: &Scope) -> Value {

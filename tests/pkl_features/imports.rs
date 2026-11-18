@@ -1373,6 +1373,75 @@ steps {
 }
 
 #[test]
+fn amended_module_mapping_declared_union_variants() {
+    let temp = TestTempDir::new("pklr_test_amended_module_mapping_declared_union_variants");
+    let dir = temp.path();
+    let amend = r#"
+steps {
+    ["g"] = new Group {}
+}
+"#;
+    // A populated default, a declared type alias, and a default whose own
+    // value type comes first in the union all accept the other member.
+    for (name, config) in [
+        (
+            "populated",
+            "steps: Mapping<String, Step | Group> = new Mapping<String, Step> { [\"s0\"] { check = \"x\" } }",
+        ),
+        (
+            "alias",
+            "typealias Items = Mapping<String, Step | Group>\nsteps: Items = new Mapping<String, Step> {}",
+        ),
+        (
+            "reversed",
+            "steps: Mapping<String, Group | Step> = new Mapping<String, Step> {}",
+        ),
+    ] {
+        std::fs::write(
+            dir.join("Config.pkl"),
+            format!(
+                "class Step {{ check: String? }}\nclass Group {{ steps: Mapping<String, Step> = new Mapping<String, Step> {{}} }}\n{config}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.pkl"),
+            format!("amends \"Config.pkl\"\n{amend}"),
+        )
+        .unwrap();
+        let json =
+            pklr::eval_to_json(&dir.join("main.pkl")).unwrap_or_else(|err| panic!("{name}: {err}"));
+        assert_eq!(
+            json["steps"]["g"],
+            serde_json::json!({"steps": {}}),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn amended_module_mapping_keeps_the_default_entry_class() {
+    let temp = TestTempDir::new("pklr_test_amended_module_mapping_default_class");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class A { kind: String = "a" }
+class B { kind: String = "b" }
+steps: Mapping<String, B | A> = new Mapping<String, A> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "amends \"Config.pkl\"\nsteps {\n    [\"s\"] {}\n}\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(json["steps"]["s"]["kind"], "a");
+}
+
+#[test]
 fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();
