@@ -1362,14 +1362,20 @@ steps {
         dir.join("bad.pkl"),
         r#"
 amends "Config.pkl"
-class Other {}
+local class Other {}
 steps {
     ["o"] = new Other {}
 }
 "#,
     )
     .unwrap();
-    assert!(pklr::eval_to_json(&dir.join("bad.pkl")).is_err());
+    let err = pklr::eval_to_json(&dir.join("bad.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Expected value of type `Step | Group`") && err.contains("got type `Other`"),
+        "{err}"
+    );
 }
 
 #[test]
