@@ -596,3 +596,22 @@ fn relative_import_with_a_query_finds_the_module_path_file() {
     let err = eval_relative("rel-query-denied", "x/query.pkl", &[query]).unwrap_err();
     assert!(err.contains("modulepath:/x/b.pkl?x=1"), "{err}");
 }
+
+#[test]
+fn denied_missing_amends_and_extends_report_the_allowlist() {
+    let (_temp, dir) = project("pklr_modules_missing_base");
+    for keyword in ["amends", "extends"] {
+        let file = dir.join(format!("{keyword}.pkl"));
+        std::fs::write(&file, format!("{keyword} \"sub/missing.pkl\"\nv = 1\n")).unwrap();
+
+        let error = eval(&file, &[pat(&file)]).unwrap_err();
+        assert!(
+            error.contains("because it does not match any entry in the module allowlist"),
+            "{keyword}: {error}"
+        );
+        // Allowed, the target is reported as missing.
+        let error = eval(&file, &["file:".into()]).unwrap_err();
+        assert!(error.contains("missing.pkl"), "{keyword}: {error}");
+        assert!(!error.contains("allowlist"), "{keyword}: {error}");
+    }
+}
