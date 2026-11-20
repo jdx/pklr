@@ -232,16 +232,16 @@ impl Evaluator {
         // The alias is the one `bind_imports` binds: the stem of the file the
         // import resolves to, so a query or fragment on the URI is not in it.
         let mut own: Vec<(Name, Value, String)> = Vec::new();
-        // Only local imports are bound as files, as in `bind_imports`.
-        for import in module.imports.iter().filter(|import| {
-            !import.is_glob
-                && (import.alias.is_some()
-                    || !import.uri.contains("://")
-                    || import.uri.starts_with("file://"))
-        }) {
-            let alias = match &import.alias {
-                Some(alias) => alias.clone(),
-                None => {
+        for import in module.imports.iter().filter(|import| !import.is_glob) {
+            let alias = match (&import.alias, remote_import_alias(&import.uri)) {
+                (Some(alias), _) => alias.clone(),
+                (None, Some(alias)) => alias,
+                (None, None)
+                    if import.uri.contains("://") && !import.uri.starts_with("file://") =>
+                {
+                    continue;
+                }
+                (None, None) => {
                     let resolved = self.resolve_relative(child, &import.uri);
                     let uri = resolved.as_deref().unwrap_or(&import.uri);
                     let Ok(import_path) = self.local_file_path(child, uri) else {
@@ -2624,14 +2624,11 @@ impl Evaluator {
 
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP import
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    uri.rsplit('/')
-                        .next()
-                        .unwrap_or(uri)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(uri)
-                        .to_string()
-                });
+                let alias = import
+                    .alias
+                    .clone()
+                    .or_else(|| remote_import_alias(uri))
+                    .unwrap_or_default();
                 if !referenced_imports.contains(alias.as_str()) {
                     continue;
                 }
@@ -2664,17 +2661,11 @@ impl Evaluator {
                 self.check_module_allowed(uri)?;
                 let pkg = self.resolve_package(uri)?;
                 self.note_package_base(uri, &pkg);
-                let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
-                let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    file_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(file_path)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(file_path)
-                        .to_string()
-                });
+                let alias = import
+                    .alias
+                    .clone()
+                    .or_else(|| remote_import_alias(uri))
+                    .unwrap_or_default();
                 if !referenced_imports.contains(alias.as_str()) {
                     continue;
                 }
@@ -2684,6 +2675,8 @@ impl Evaluator {
                     #[cfg(feature = "package-zip")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
+                        let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
+                        let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
                         let local_path = pkg_dir.join(file_path);
                         let imported_val = self.eval_file_with_requested_fields(
                             &local_path,
@@ -2844,6 +2837,24 @@ fn default_import_alias(import_path: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+/// The name an import without an `as` alias binds, for the URIs that are not
+/// local files: an http(s) or package module is named by the last segment of
+/// its path (of the fragment, for a package), a `pkl:` module by its name.
+fn remote_import_alias(uri: &str) -> Option<String> {
+    let last_segment = |path: &str| {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        name.strip_suffix(".pkl").unwrap_or(path).to_string()
+    };
+    if uri.starts_with("https://") || uri.starts_with("http://") {
+        Some(last_segment(uri))
+    } else if uri.starts_with("package://") {
+        let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
+        Some(last_segment(fragment.strip_prefix('/').unwrap_or(fragment)))
+    } else {
+        uri.strip_prefix("pkl:").map(str::to_string)
+    }
 }
 
 /// Standard library types that are not annotation classes.
