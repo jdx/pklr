@@ -217,7 +217,7 @@ impl Evaluator {
     /// An import is evaluated only for the fields its importer reads, so when
     /// the child imports the same module as the base under the same name, the
     /// base's value lacks the fields only the child reads. Both views are kept,
-    /// the child's winning. A name bound to a different module keeps the
+    /// the base's winning for members both have. A name bound to a different module keeps the
     /// base's binding, which the base's inherited type aliases resolve through.
     fn layer_inherited_scope(
         &mut self,
@@ -229,44 +229,39 @@ impl Evaluator {
         self.inherited_bases
             .insert(child.to_path_buf(), base.to_path_buf());
         // Only names the base binds too can lose fields, so look at those.
-        let aliases: Vec<Name> = if self.module_scopes.contains_key(base) {
-            {
-                // The alias is the one `bind_imports` binds: the stem of the
-                // file the import resolves to, so a query or fragment on the
-                // URI is not in it.
-                let mut shared = Vec::new();
-                for import in module.imports.iter().filter(|import| !import.is_glob) {
-                    let alias = match (&import.alias, remote_import_alias(&import.uri)) {
-                        (Some(alias), _) => alias.clone(),
-                        (None, Some(alias)) => alias,
-                        (None, None)
-                            if import.uri.contains("://") && !import.uri.starts_with("file://") =>
-                        {
+        let mut shared: Vec<Name> = Vec::new();
+        if self.module_scopes.contains_key(base) {
+            // The alias is the one `bind_imports` binds: the stem of the file
+            // the import resolves to, so a query or fragment on the URI is not
+            // in it.
+            for import in module.imports.iter().filter(|import| !import.is_glob) {
+                let alias = match (&import.alias, remote_import_alias(&import.uri)) {
+                    (Some(alias), _) => alias.clone(),
+                    (None, Some(alias)) => alias,
+                    (None, None)
+                        if import.uri.contains("://") && !import.uri.starts_with("file://") =>
+                    {
+                        continue;
+                    }
+                    (None, None) => {
+                        let resolved = self.resolve_relative(child, &import.uri);
+                        let uri = resolved.as_deref().unwrap_or(&import.uri);
+                        let Ok(import_path) = self.local_file_path(child, uri) else {
                             continue;
-                        }
-                        (None, None) => {
-                            let resolved = self.resolve_relative(child, &import.uri);
-                            let uri = resolved.as_deref().unwrap_or(&import.uri);
-                            let Ok(import_path) = self.local_file_path(child, uri) else {
-                                continue;
-                            };
-                            default_import_alias(&import_path)
-                        }
-                    };
-                    shared.push(name_of(&alias));
+                        };
+                        default_import_alias(&import_path)
+                    }
+                };
+                let name = name_of(&alias);
+                if self
+                    .module_scopes
+                    .get(base)
+                    .is_some_and(|inherited| inherited.values.contains_key(&*name))
+                {
+                    shared.push(name);
                 }
-                shared
             }
-        } else {
-            Vec::new()
-        };
-        let shared: Vec<Name> = match self.module_scopes.get(base) {
-            Some(inherited) => aliases
-                .into_iter()
-                .filter(|name| inherited.values.contains_key(&**name))
-                .collect(),
-            None => Vec::new(),
-        };
+        }
         if shared.is_empty() {
             self.layer_evaluated_module_scope(base, scope);
             return;

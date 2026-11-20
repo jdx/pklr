@@ -127,3 +127,30 @@ fn a_member_one_import_view_builds_is_not_failed_in_the_merged_import() {
         serde_json::json!({"name": "C", "value": 1})
     );
 }
+
+#[test]
+fn a_failed_member_only_the_child_reads_still_fails() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr-amend-import-child-failed-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, source: &str| std::fs::write(dir.join(name), source).unwrap();
+    write("Config.pkl", "value: Int = 0\nother: Any = null\n");
+    write("Lib.pkl", "bad = throw(\"boom\")\nok = 1\n");
+    write(
+        "mid.pkl",
+        "amends \"Config.pkl\"\nimport \"Lib.pkl\"\nvalue = Lib.ok\n",
+    );
+    write(
+        "hk.pkl",
+        "amends \"mid.pkl\"\nimport \"Lib.pkl\"\nother = Lib.bad\n",
+    );
+    let result = pklr::eval_to_json(&dir.join("hk.pkl"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let error = result
+        .expect_err("reading a failed member must fail")
+        .to_string();
+    assert!(error.contains("`bad`"), "{error}");
+}

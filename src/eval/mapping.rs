@@ -388,7 +388,7 @@ pub(super) fn type_names_match(a: &str, b: &str) -> bool {
 /// importer's view has. An import is evaluated only for the fields its importer
 /// reads, so each view lacks the others' fields. The base's view stays as it is
 /// for the members it has: inherited entries were evaluated against it. `None`
-/// when the importer's view adds nothing.
+/// when the importer's view adds no member, failure or deprecation.
 pub(super) fn merge_partial_module_values(base: &Value, current: &Value) -> Option<Value> {
     let (Value::Object(base_map, base_source), Value::Object(current_map, current_source)) =
         (base, current)
@@ -399,7 +399,24 @@ pub(super) fn merge_partial_module_values(base: &Value, current: &Value) -> Opti
         .iter()
         .filter(|(name, _)| !base_map.contains_key(*name))
         .collect();
-    if added.is_empty() {
+    let adds_metadata = match (base_source, current_source) {
+        (Some(base), Some(current)) => {
+            current.deprecated.keys().any(|name| {
+                !base_map.contains_key(name.as_str()) && !base.deprecated.contains_key(name)
+            }) || current.poisoned_members.as_ref().is_some_and(|failed| {
+                failed.keys().any(|name| {
+                    !base_map.contains_key(name)
+                        && !current_map.contains_key(name)
+                        && !base
+                            .poisoned_members
+                            .as_ref()
+                            .is_some_and(|b| b.contains_key(name))
+                })
+            })
+        }
+        _ => false,
+    };
+    if added.is_empty() && !adds_metadata {
         return None;
     }
     let mut merged = (**base_map).clone();
