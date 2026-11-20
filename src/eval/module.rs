@@ -213,10 +213,82 @@ impl Evaluator {
 
     /// Layer the scope of the base `base` that `child` amends or extends into
     /// `scope`, and remember it as the child's base.
-    fn layer_inherited_scope(&mut self, child: &Path, base: &Path, scope: &mut Scope) {
+    ///
+    /// An import is evaluated only for the fields its importer reads, so when
+    /// the child imports the same module as the base under the same name, the
+    /// base's value lacks the fields only the child reads. Both views are kept,
+    /// the base's winning for members both have. A name bound to a different module keeps the
+    /// base's binding, which the base's inherited type aliases resolve through.
+    fn layer_inherited_scope(
+        &mut self,
+        module: &Module,
+        child: &Path,
+        base: &Path,
+        scope: &mut Scope,
+    ) {
         self.inherited_bases
             .insert(child.to_path_buf(), base.to_path_buf());
+        // Only names the base binds too can lose fields, so look at those.
+        let mut shared: Vec<Name> = Vec::new();
+        if self.module_scopes.contains_key(base) {
+            // The alias is the one `bind_imports` binds: the stem of the file
+            // the import resolves to, so a query or fragment on the URI is not
+            // in it.
+            for import in module.imports.iter().filter(|import| !import.is_glob) {
+                let alias = match (&import.alias, remote_import_alias(&import.uri)) {
+                    (Some(alias), _) => alias.clone(),
+                    (None, Some(alias)) => alias,
+                    (None, None)
+                        if import.uri.contains("://") && !import.uri.starts_with("file://") =>
+                    {
+                        continue;
+                    }
+                    (None, None) => {
+                        let resolved = self.resolve_relative(child, &import.uri);
+                        let uri = resolved.as_deref().unwrap_or(&import.uri);
+                        let Ok(import_path) = self.local_file_path(child, uri) else {
+                            continue;
+                        };
+                        default_import_alias(&import_path)
+                    }
+                };
+                let name = name_of(&alias);
+                if self
+                    .module_scopes
+                    .get(base)
+                    .is_some_and(|inherited| inherited.values.contains_key(&*name))
+                {
+                    shared.push(name);
+                }
+            }
+        }
+        if shared.is_empty() {
+            self.layer_evaluated_module_scope(base, scope);
+            return;
+        }
+        let identities = scope.flatten_module_identities();
+        let own: Vec<(Name, Value, String)> = shared
+            .into_iter()
+            .filter_map(|name| {
+                let value = scope.get(&name)?.clone();
+                let identity = identities.get(&*name)?.clone();
+                Some((name, value, identity))
+            })
+            .collect();
         self.layer_evaluated_module_scope(base, scope);
+        let identities = scope.flatten_module_identities();
+        for (name, own_value, own_identity) in own {
+            if identities.get(&*name) != Some(&own_identity) {
+                continue;
+            }
+            let Some(inherited) = scope.get(&name) else {
+                continue;
+            };
+            if let Some(merged) = merge_partial_module_values(inherited, &own_value) {
+                scope.declare_name(name.clone(), merged);
+                scope.set_module_identity(name, own_identity);
+            }
+        }
     }
 
     pub(super) fn layer_evaluated_module_scope(&self, path: &Path, scope: &mut Scope) {
@@ -2162,7 +2234,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_inherited_scope(path, Path::new(uri), scope);
+                self.layer_inherited_scope(module, path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = base_val {
                     *base_obj = (*m).clone();
@@ -2189,7 +2261,7 @@ impl Evaluator {
                             Some(scope.clone()),
                             None,
                         )?;
-                        self.layer_inherited_scope(path, &local_path, scope);
+                        self.layer_inherited_scope(module, path, &local_path, scope);
                         late_inherited_properties
                             .extend(self.inherited_late_properties(&local_path));
                         if let Value::Object(m, _) = base_val {
@@ -2217,7 +2289,7 @@ impl Evaluator {
                         Some(scope.clone()),
                         None,
                     )?;
-                    self.layer_inherited_scope(path, Path::new(url.as_str()), scope);
+                    self.layer_inherited_scope(module, path, Path::new(url.as_str()), scope);
                     late_inherited_properties
                         .extend(self.inherited_late_properties(Path::new(url.as_str())));
                     if let Value::Object(m, _) = base_val {
@@ -2236,7 +2308,7 @@ impl Evaluator {
                     self.check_not_self(module, path, &amends_path, "amend")?;
                     let base_val =
                         self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_inherited_scope(path, &amends_path, scope);
+                    self.layer_inherited_scope(module, path, &amends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
                     if let Value::Object(m, _) = &base_val {
                         self.bind_deferred_inherited_imports(
@@ -2373,7 +2445,7 @@ impl Evaluator {
                     }
                     let ext_val =
                         self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_inherited_scope(path, &extends_path, scope);
+                    self.layer_inherited_scope(module, path, &extends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
                     let name = extends_path.display().to_string();
                     let source = self.read_to_string_io(&extends_path)?;
@@ -2483,7 +2555,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_inherited_scope(path, Path::new(uri), scope);
+                self.layer_inherited_scope(module, path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = ext_val {
                     *base_obj = (*m).clone();
@@ -2577,14 +2649,11 @@ impl Evaluator {
 
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP import
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    uri.rsplit('/')
-                        .next()
-                        .unwrap_or(uri)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(uri)
-                        .to_string()
-                });
+                let alias = import
+                    .alias
+                    .clone()
+                    .or_else(|| remote_import_alias(uri))
+                    .unwrap_or_default();
                 if !referenced_imports.contains(alias.as_str()) {
                     continue;
                 }
@@ -2617,17 +2686,11 @@ impl Evaluator {
                 self.check_module_allowed(uri)?;
                 let pkg = self.resolve_package(uri)?;
                 self.note_package_base(uri, &pkg);
-                let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
-                let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    file_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(file_path)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(file_path)
-                        .to_string()
-                });
+                let alias = import
+                    .alias
+                    .clone()
+                    .or_else(|| remote_import_alias(uri))
+                    .unwrap_or_default();
                 if !referenced_imports.contains(alias.as_str()) {
                     continue;
                 }
@@ -2637,6 +2700,8 @@ impl Evaluator {
                     #[cfg(feature = "package-zip")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
+                        let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
+                        let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
                         let local_path = pkg_dir.join(file_path);
                         let imported_val = self.eval_file_with_requested_fields(
                             &local_path,
@@ -2745,13 +2810,10 @@ impl Evaluator {
                 }
                 Err(error) => return Err(error),
             };
-            let alias = import.alias.clone().unwrap_or_else(|| {
-                import_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
+            let alias = import
+                .alias
+                .clone()
+                .unwrap_or_else(|| default_import_alias(&import_path));
             if !referenced_imports.contains(alias.as_str()) {
                 // Unused imports are intentionally lazy: missing local paths are
                 // reported only if the imported binding is actually referenced.
@@ -2789,6 +2851,34 @@ impl Evaluator {
             }
         }
         Ok(deferred_inherited_imports)
+    }
+}
+
+/// The name a local import binds when it has no `as` alias: the stem of the
+/// file it resolves to.
+fn default_import_alias(import_path: &Path) -> String {
+    import_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// The name an import without an `as` alias binds, for the URIs that are not
+/// local files: an http(s) or package module is named by the last segment of
+/// its path (of the fragment, for a package), a `pkl:` module by its name.
+fn remote_import_alias(uri: &str) -> Option<String> {
+    let last_segment = |path: &str| {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        name.strip_suffix(".pkl").unwrap_or(path).to_string()
+    };
+    if uri.starts_with("https://") || uri.starts_with("http://") {
+        Some(last_segment(uri))
+    } else if uri.starts_with("package://") {
+        let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
+        Some(last_segment(fragment.strip_prefix('/').unwrap_or(fragment)))
+    } else {
+        uri.strip_prefix("pkl:").map(str::to_string)
     }
 }
 

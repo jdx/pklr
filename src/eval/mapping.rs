@@ -384,22 +384,78 @@ pub(super) fn type_names_match(a: &str, b: &str) -> bool {
         || (b.len() > a.len() && b.ends_with(a) && b.as_bytes()[b.len() - a.len() - 1] == b'.')
 }
 
+/// Add to the base's view of an imported module the members only the
+/// importer's view has. An import is evaluated only for the fields its importer
+/// reads, so each view lacks the others' fields. The base's view stays as it is
+/// for the members it has: inherited entries were evaluated against it. `None`
+/// when the importer's view adds no member, failure or deprecation.
 pub(super) fn merge_partial_module_values(base: &Value, current: &Value) -> Option<Value> {
     let (Value::Object(base_map, base_source), Value::Object(current_map, current_source)) =
         (base, current)
     else {
         return None;
     };
+    let added: Vec<_> = current_map
+        .iter()
+        .filter(|(name, _)| !base_map.contains_key(*name))
+        .collect();
+    let adds_metadata = match (base_source, current_source) {
+        (Some(base), Some(current)) => {
+            current.deprecated.keys().any(|name| {
+                !base_map.contains_key(name.as_str()) && !base.deprecated.contains_key(name)
+            }) || current.poisoned_members.as_ref().is_some_and(|failed| {
+                failed.keys().any(|name| {
+                    !base_map.contains_key(name)
+                        && !current_map.contains_key(name)
+                        && !base
+                            .poisoned_members
+                            .as_ref()
+                            .is_some_and(|b| b.contains_key(name))
+                })
+            })
+        }
+        _ => false,
+    };
+    if added.is_empty() && !adds_metadata {
+        return None;
+    }
     let mut merged = (**base_map).clone();
     merged.extend(
-        current_map
+        added
             .iter()
-            .map(|(name, value)| (name.clone(), value.clone())),
+            .map(|(name, value)| ((*name).clone(), (*value).clone())),
     );
-    Some(Value::Object(
-        Arc::new(merged),
-        current_source.clone().or_else(|| base_source.clone()),
-    ))
+    let source = match (base_source, current_source) {
+        (Some(base), Some(current)) => {
+            let mut source = Arc::clone(base);
+            let merged_source = Arc::make_mut(&mut source);
+            for (name, message) in &current.deprecated {
+                if !base_map.contains_key(name.as_str()) {
+                    merged_source
+                        .deprecated
+                        .entry(name.clone())
+                        .or_insert_with(|| message.clone());
+                }
+            }
+            if let Some(current_failed) = &current.poisoned_members {
+                let mut failed = merged_source
+                    .poisoned_members
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_default();
+                failed.retain(|name, _| base_map.contains_key(name) || !merged.contains_key(name));
+                for (name, member) in current_failed.iter() {
+                    if !merged.contains_key(name) {
+                        failed.entry(name.clone()).or_insert_with(|| member.clone());
+                    }
+                }
+                merged_source.poisoned_members = Some(Arc::new(failed));
+            }
+            Some(source)
+        }
+        (None, source) | (source, None) => source.clone(),
+    };
+    Some(Value::Object(Arc::new(merged), source))
 }
 
 pub(super) fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {
