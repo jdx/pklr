@@ -548,10 +548,15 @@ impl Evaluator {
                 .is_some_and(|(base, current)| base == current);
             let value = if same_module {
                 // Still the base's own import, so it keeps the base's mark.
-                eval_scope
-                    .get(&k)
-                    .and_then(|base| merge_partial_module_values(base, &v))
-                    .unwrap_or(v)
+                match eval_scope.get(&k) {
+                    // The current view adds nothing, so the base's view, which
+                    // has every field the inherited entries read, stays.
+                    Some(base @ Value::Object(..)) if matches!(v, Value::Object(..)) => {
+                        merge_partial_module_values(base, &v).unwrap_or_else(|| base.clone())
+                    }
+                    Some(base) => merge_partial_module_values(base, &v).unwrap_or(v),
+                    None => v,
+                }
             } else if inherited_references.contains(&*k) && eval_scope.get(&k).is_some() {
                 preserved_inherited_bindings.insert(k.clone());
                 continue;
