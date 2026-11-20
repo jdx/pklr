@@ -229,20 +229,31 @@ impl Evaluator {
         self.inherited_bases
             .insert(child.to_path_buf(), base.to_path_buf());
         let identities = scope.flatten_module_identities();
-        let own: Vec<(Name, Value, String)> = module
-            .imports
-            .iter()
-            .filter(|import| !import.is_glob)
-            .filter_map(|import| {
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    let name = import.uri.rsplit('/').next().unwrap_or(&import.uri);
-                    name.strip_suffix(".pkl").unwrap_or(name).to_string()
-                });
-                let value = scope.get(&alias)?.clone();
-                let identity = identities.get(&alias)?.clone();
-                Some((name_of(&alias), value, identity))
-            })
-            .collect();
+        // The alias is the one `bind_imports` binds: the stem of the file the
+        // import resolves to, so a query or fragment on the URI is not in it.
+        let mut own: Vec<(Name, Value, String)> = Vec::new();
+        for import in module.imports.iter().filter(|import| !import.is_glob) {
+            let alias = match &import.alias {
+                Some(alias) => alias.clone(),
+                None => {
+                    let resolved = self.resolve_relative(child, &import.uri);
+                    let uri = resolved.as_deref().unwrap_or(&import.uri);
+                    let Ok(import_path) = self.local_file_path(child, uri) else {
+                        continue;
+                    };
+                    import_path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                }
+            };
+            if let Some(value) = scope.get(&alias)
+                && let Some(identity) = identities.get(&alias)
+            {
+                own.push((name_of(&alias), value.clone(), identity.clone()));
+            }
+        }
         self.layer_evaluated_module_scope(base, scope);
         let identities = scope.flatten_module_identities();
         for (name, own_value, own_identity) in own {
