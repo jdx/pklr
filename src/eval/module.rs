@@ -228,34 +228,58 @@ impl Evaluator {
     ) {
         self.inherited_bases
             .insert(child.to_path_buf(), base.to_path_buf());
-        let identities = scope.flatten_module_identities();
-        // The alias is the one `bind_imports` binds: the stem of the file the
-        // import resolves to, so a query or fragment on the URI is not in it.
-        let mut own: Vec<(Name, Value, String)> = Vec::new();
-        for import in module.imports.iter().filter(|import| !import.is_glob) {
-            let alias = match (&import.alias, remote_import_alias(&import.uri)) {
-                (Some(alias), _) => alias.clone(),
-                (None, Some(alias)) => alias,
-                (None, None)
-                    if import.uri.contains("://") && !import.uri.starts_with("file://") =>
-                {
-                    continue;
-                }
-                (None, None) => {
-                    let resolved = self.resolve_relative(child, &import.uri);
-                    let uri = resolved.as_deref().unwrap_or(&import.uri);
-                    let Ok(import_path) = self.local_file_path(child, uri) else {
-                        continue;
-                    };
-                    default_import_alias(&import_path)
-                }
-            };
-            if let Some(value) = scope.get(&alias)
-                && let Some(identity) = identities.get(&alias)
+        // Only names the base binds too can lose fields, so look at those.
+        let aliases: Vec<Name> = if self.module_scopes.contains_key(base) {
             {
-                own.push((name_of(&alias), value.clone(), identity.clone()));
+                // The alias is the one `bind_imports` binds: the stem of the
+                // file the import resolves to, so a query or fragment on the
+                // URI is not in it.
+                let mut shared = Vec::new();
+                for import in module.imports.iter().filter(|import| !import.is_glob) {
+                    let alias = match (&import.alias, remote_import_alias(&import.uri)) {
+                        (Some(alias), _) => alias.clone(),
+                        (None, Some(alias)) => alias,
+                        (None, None)
+                            if import.uri.contains("://") && !import.uri.starts_with("file://") =>
+                        {
+                            continue;
+                        }
+                        (None, None) => {
+                            let resolved = self.resolve_relative(child, &import.uri);
+                            let uri = resolved.as_deref().unwrap_or(&import.uri);
+                            let Ok(import_path) = self.local_file_path(child, uri) else {
+                                continue;
+                            };
+                            default_import_alias(&import_path)
+                        }
+                    };
+                    shared.push(name_of(&alias));
+                }
+                shared
             }
+        } else {
+            Vec::new()
+        };
+        let shared: Vec<Name> = match self.module_scopes.get(base) {
+            Some(inherited) => aliases
+                .into_iter()
+                .filter(|name| inherited.values.contains_key(&**name))
+                .collect(),
+            None => Vec::new(),
+        };
+        if shared.is_empty() {
+            self.layer_evaluated_module_scope(base, scope);
+            return;
         }
+        let identities = scope.flatten_module_identities();
+        let own: Vec<(Name, Value, String)> = shared
+            .into_iter()
+            .filter_map(|name| {
+                let value = scope.get(&name)?.clone();
+                let identity = identities.get(&*name)?.clone();
+                Some((name, value, identity))
+            })
+            .collect();
         self.layer_evaluated_module_scope(base, scope);
         let identities = scope.flatten_module_identities();
         for (name, own_value, own_identity) in own {

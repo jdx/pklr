@@ -100,3 +100,30 @@ fn merging_a_child_import_keeps_the_failed_members_of_the_base_import() {
         .to_string();
     assert!(error.contains("boom"), "{error}");
 }
+
+#[test]
+fn a_member_one_import_view_builds_is_not_failed_in_the_merged_import() {
+    let dir = std::env::temp_dir().join(format!("pklr-amend-import-class-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, source: &str| std::fs::write(dir.join(name), source).unwrap();
+    write("Config.pkl", "name: String = \"\"\nvalue: Int = 0\n");
+    write(
+        "Lib.pkl",
+        "const seed = \"x\"\nclass C { v = module.seed }\nok = 1\n",
+    );
+    write(
+        "mid.pkl",
+        "amends \"Config.pkl\"\nimport \"Lib.pkl\"\nname = Lib.C.simpleName\nvalue = Lib.ok\n",
+    );
+    write(
+        "hk.pkl",
+        "amends \"mid.pkl\"\nimport \"Lib.pkl\"\nvalue = Lib.ok\n",
+    );
+    let result = pklr::eval_to_json(&dir.join("hk.pkl"));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        result.expect("evaluation failed"),
+        serde_json::json!({"name": "C", "value": 1})
+    );
+}
