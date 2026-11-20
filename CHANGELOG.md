@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.4](https://github.com/jdx/pklr/compare/v6.0.3...v6.0.4) - 2026-11-20
+
+### Fixed
+
+- *(eval)* keep an amending module's own import of the module its base imports ([#484](https://github.com/jdx/pklr/pull/484))
+- *(eval)* fail when a local amends or extends target is missing ([#483](https://github.com/jdx/pklr/pull/483))
+- *(eval)* accept entries of the declared type when amending a Mapping property ([#482](https://github.com/jdx/pklr/pull/482))
+
+### Other
+
+- *(deps)* lock file maintenance ([#479](https://github.com/jdx/pklr/pull/479))
+
 ## [6.0.3](https://github.com/jdx/pklr/compare/v6.0.2...v6.0.3) - 2026-11-15
 
 ### Fixed
