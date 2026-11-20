@@ -1017,7 +1017,6 @@ fn eval_src(src: &str) -> serde_json::Value {
 #[test]
 fn eval_simple_object() {
     let src = r#"
-amends "pkl/Config.pkl"
 fail_fast = false
 "#;
     let json = eval_src(src);
@@ -1027,7 +1026,6 @@ fail_fast = false
 #[test]
 fn eval_string_property() {
     let src = r#"
-amends "pkl/Config.pkl"
 default_branch = "main"
 "#;
     let json = eval_src(src);
@@ -1037,7 +1035,6 @@ default_branch = "main"
 #[test]
 fn eval_list_function() {
     let src = r#"
-amends "pkl/Config.pkl"
 warnings = List("missing-profiles", "no-steps")
 "#;
     let json = eval_src(src);
@@ -1050,7 +1047,6 @@ warnings = List("missing-profiles", "no-steps")
 #[test]
 fn eval_nested_object_body() {
     let src = r#"
-amends "pkl/Config.pkl"
 hooks {
     ["pre-commit"] {
         fix = true
@@ -1064,7 +1060,6 @@ hooks {
 #[test]
 fn eval_local_variable() {
     let src = r#"
-amends "pkl/Config.pkl"
 local myval = "hello"
 default_branch = myval
 "#;
@@ -1075,7 +1070,6 @@ default_branch = myval
 #[test]
 fn eval_new_mapping() {
     let src = r#"
-amends "pkl/Config.pkl"
 local steps = new Mapping {
     ["cargo-fmt"] {
         glob = "**/*.rs"
@@ -1139,7 +1133,6 @@ hooks {
 #[test]
 fn eval_spread_operator() {
     let src = r#"
-amends "pkl/Config.pkl"
 local extra = new Mapping {
     ["b"] {
         check = "echo b"
@@ -1164,7 +1157,6 @@ hooks {
 #[test]
 fn eval_integer_and_bool() {
     let src = r#"
-amends "pkl/Config.pkl"
 fail_fast = true
 "#;
     let json = eval_src(src);
@@ -1862,4 +1854,20 @@ fn test_local_wins_over_a_class_property_declared_without_a_value() {
         json["amended"]["tests"]["a"]["write"]["a.txt"],
         "formatted\n"
     );
+}
+
+#[test]
+fn missing_local_amends_target_is_an_error() {
+    let dir = std::env::temp_dir().join(format!("pklr-missing-amends-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for keyword in ["amends", "extends"] {
+        let path = dir.join(format!("{keyword}.pkl"));
+        std::fs::write(&path, format!("{keyword} \"./nope/base.pkl\"\nanswer = 42\n")).unwrap();
+        let err = Evaluator::new().eval_file(&path).unwrap_err();
+        assert!(
+            matches!(err, pklr::Error::ImportNotFound(ref p) if p.ends_with("nope/base.pkl")),
+            "{keyword}: {err:?}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

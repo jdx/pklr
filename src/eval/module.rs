@@ -2248,6 +2248,8 @@ impl Evaluator {
                         *base_obj = (**m).clone();
                     }
                     *super_members = Some(self.module_super_members(&amends_path, base_obj, false));
+                } else {
+                    return Err(Error::ImportNotFound(amends_path.display().to_string()));
                 }
             }
         }
@@ -2444,6 +2446,8 @@ impl Evaluator {
                     }
                     *super_members = Some(self.module_super_members(&extends_path, base_obj, true));
                     *super_name = Some(module_display_name(&base_module, &extends_path));
+                } else if !uri.starts_with("pkl:") {
+                    return Err(Error::ImportNotFound(extends_path.display().to_string()));
                 }
             } else if uri.starts_with("https://") || uri.starts_with("http://") {
                 self.check_not_self(module, path, Path::new(uri), "extend")?;
