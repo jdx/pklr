@@ -396,10 +396,34 @@ pub(super) fn merge_partial_module_values(base: &Value, current: &Value) -> Opti
             .iter()
             .map(|(name, value)| (name.clone(), value.clone())),
     );
-    Some(Value::Object(
-        Arc::new(merged),
-        current_source.clone().or_else(|| base_source.clone()),
-    ))
+    // Each import is evaluated for the fields its importer reads, so each view
+    // knows the deprecated and failed members of different fields.
+    let source = match (base_source, current_source) {
+        (Some(base), Some(current)) => {
+            let mut source = Arc::clone(current);
+            let merged_source = Arc::make_mut(&mut source);
+            for (name, message) in &base.deprecated {
+                merged_source
+                    .deprecated
+                    .entry(name.clone())
+                    .or_insert_with(|| message.clone());
+            }
+            if let Some(base_failed) = &base.poisoned_members {
+                let mut failed = merged_source
+                    .poisoned_members
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_default();
+                for (name, member) in base_failed.iter() {
+                    failed.entry(name.clone()).or_insert_with(|| member.clone());
+                }
+                merged_source.poisoned_members = Some(Arc::new(failed));
+            }
+            Some(source)
+        }
+        (None, source) | (source, None) => source.clone(),
+    };
+    Some(Value::Object(Arc::new(merged), source))
 }
 
 pub(super) fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {

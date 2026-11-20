@@ -76,3 +76,27 @@ fn child_import_with_a_query_keeps_the_fields_it_reads() {
         serde_json::json!({"steps": {"a": {"check": "n"}, "b": {"check": "p"}}})
     );
 }
+
+#[test]
+fn merging_a_child_import_keeps_the_failed_members_of_the_base_import() {
+    let dir = std::env::temp_dir().join(format!("pklr-amend-import-failed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, source: &str| std::fs::write(dir.join(name), source).unwrap();
+    write("Config.pkl", "value: Any = null\n");
+    write("Lib.pkl", "bad = throw(\"boom\")\n@Deprecated\nok = 1\n");
+    write(
+        "mid.pkl",
+        "amends \"Config.pkl\"\nimport \"Lib.pkl\"\nvalue = Lib\n",
+    );
+    write(
+        "hk.pkl",
+        "amends \"mid.pkl\"\nimport \"Lib.pkl\"\nlocal other = Lib.ok\nvalue { ok2 = other }\n",
+    );
+    let result = pklr::eval_to_json(&dir.join("hk.pkl"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let error = result
+        .expect_err("the failed member must still fail")
+        .to_string();
+    assert!(error.contains("boom"), "{error}");
+}

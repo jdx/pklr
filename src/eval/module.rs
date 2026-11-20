@@ -232,7 +232,13 @@ impl Evaluator {
         // The alias is the one `bind_imports` binds: the stem of the file the
         // import resolves to, so a query or fragment on the URI is not in it.
         let mut own: Vec<(Name, Value, String)> = Vec::new();
-        for import in module.imports.iter().filter(|import| !import.is_glob) {
+        // Only local imports are bound as files, as in `bind_imports`.
+        for import in module.imports.iter().filter(|import| {
+            !import.is_glob
+                && (import.alias.is_some()
+                    || !import.uri.contains("://")
+                    || import.uri.starts_with("file://"))
+        }) {
             let alias = match &import.alias {
                 Some(alias) => alias.clone(),
                 None => {
@@ -241,11 +247,7 @@ impl Evaluator {
                     let Ok(import_path) = self.local_file_path(child, uri) else {
                         continue;
                     };
-                    import_path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
+                    default_import_alias(&import_path)
                 }
             };
             if let Some(value) = scope.get(&alias)
@@ -2790,13 +2792,10 @@ impl Evaluator {
                 }
                 Err(error) => return Err(error),
             };
-            let alias = import.alias.clone().unwrap_or_else(|| {
-                import_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
+            let alias = import
+                .alias
+                .clone()
+                .unwrap_or_else(|| default_import_alias(&import_path));
             if !referenced_imports.contains(alias.as_str()) {
                 // Unused imports are intentionally lazy: missing local paths are
                 // reported only if the imported binding is actually referenced.
@@ -2835,6 +2834,16 @@ impl Evaluator {
         }
         Ok(deferred_inherited_imports)
     }
+}
+
+/// The name a local import binds when it has no `as` alias: the stem of the
+/// file it resolves to.
+fn default_import_alias(import_path: &Path) -> String {
+    import_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Standard library types that are not annotation classes.
