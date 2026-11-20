@@ -213,10 +213,50 @@ impl Evaluator {
 
     /// Layer the scope of the base `base` that `child` amends or extends into
     /// `scope`, and remember it as the child's base.
-    fn layer_inherited_scope(&mut self, child: &Path, base: &Path, scope: &mut Scope) {
+    ///
+    /// An import is evaluated only for the fields its importer reads, so when
+    /// the child imports the same module as the base under the same name, the
+    /// base's value lacks the fields only the child reads. Both views are kept,
+    /// the child's winning. A name bound to a different module keeps the
+    /// base's binding, which the base's inherited type aliases resolve through.
+    fn layer_inherited_scope(
+        &mut self,
+        module: &Module,
+        child: &Path,
+        base: &Path,
+        scope: &mut Scope,
+    ) {
         self.inherited_bases
             .insert(child.to_path_buf(), base.to_path_buf());
+        let identities = scope.flatten_module_identities();
+        let own: Vec<(Name, Value, String)> = module
+            .imports
+            .iter()
+            .filter(|import| !import.is_glob)
+            .filter_map(|import| {
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    let name = import.uri.rsplit('/').next().unwrap_or(&import.uri);
+                    name.strip_suffix(".pkl").unwrap_or(name).to_string()
+                });
+                let value = scope.get(&alias)?.clone();
+                let identity = identities.get(&alias)?.clone();
+                Some((name_of(&alias), value, identity))
+            })
+            .collect();
         self.layer_evaluated_module_scope(base, scope);
+        let identities = scope.flatten_module_identities();
+        for (name, own_value, own_identity) in own {
+            if identities.get(&*name) != Some(&own_identity) {
+                continue;
+            }
+            let Some(inherited) = scope.get(&name) else {
+                continue;
+            };
+            if let Some(merged) = merge_partial_module_values(inherited, &own_value) {
+                scope.declare_name(name.clone(), merged);
+                scope.set_module_identity(name, own_identity);
+            }
+        }
     }
 
     pub(super) fn layer_evaluated_module_scope(&self, path: &Path, scope: &mut Scope) {
@@ -2162,7 +2202,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_inherited_scope(path, Path::new(uri), scope);
+                self.layer_inherited_scope(module, path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = base_val {
                     *base_obj = (*m).clone();
@@ -2189,7 +2229,7 @@ impl Evaluator {
                             Some(scope.clone()),
                             None,
                         )?;
-                        self.layer_inherited_scope(path, &local_path, scope);
+                        self.layer_inherited_scope(module, path, &local_path, scope);
                         late_inherited_properties
                             .extend(self.inherited_late_properties(&local_path));
                         if let Value::Object(m, _) = base_val {
@@ -2217,7 +2257,7 @@ impl Evaluator {
                         Some(scope.clone()),
                         None,
                     )?;
-                    self.layer_inherited_scope(path, Path::new(url.as_str()), scope);
+                    self.layer_inherited_scope(module, path, Path::new(url.as_str()), scope);
                     late_inherited_properties
                         .extend(self.inherited_late_properties(Path::new(url.as_str())));
                     if let Value::Object(m, _) = base_val {
@@ -2236,7 +2276,7 @@ impl Evaluator {
                     self.check_not_self(module, path, &amends_path, "amend")?;
                     let base_val =
                         self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_inherited_scope(path, &amends_path, scope);
+                    self.layer_inherited_scope(module, path, &amends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
                     if let Value::Object(m, _) = &base_val {
                         self.bind_deferred_inherited_imports(
@@ -2370,7 +2410,7 @@ impl Evaluator {
                     }
                     let ext_val =
                         self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_inherited_scope(path, &extends_path, scope);
+                    self.layer_inherited_scope(module, path, &extends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
                     let name = extends_path.display().to_string();
                     let source = self.read_to_string_io(&extends_path)?;
@@ -2477,7 +2517,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_inherited_scope(path, Path::new(uri), scope);
+                self.layer_inherited_scope(module, path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = ext_val {
                     *base_obj = (*m).clone();
