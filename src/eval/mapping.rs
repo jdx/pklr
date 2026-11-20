@@ -443,7 +443,7 @@ pub(super) fn merge_partial_module_values(base: &Value, current: &Value) -> Opti
                     .as_deref()
                     .cloned()
                     .unwrap_or_default();
-                failed.retain(|name, _| !merged.contains_key(name));
+                failed.retain(|name, _| base_map.contains_key(name) || !merged.contains_key(name));
                 for (name, member) in current_failed.iter() {
                     if !merged.contains_key(name) {
                         failed.entry(name.clone()).or_insert_with(|| member.clone());
