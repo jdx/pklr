@@ -1862,7 +1862,11 @@ fn missing_local_amends_target_is_an_error() {
     std::fs::create_dir_all(&dir).unwrap();
     for keyword in ["amends", "extends"] {
         let path = dir.join(format!("{keyword}.pkl"));
-        std::fs::write(&path, format!("{keyword} \"./nope/base.pkl\"\nanswer = 42\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("{keyword} \"./nope/base.pkl\"\nanswer = 42\n"),
+        )
+        .unwrap();
         let err = Evaluator::new().eval_file(&path).unwrap_err();
         assert!(
             matches!(err, pklr::Error::ImportNotFound(ref p) if p.ends_with("nope/base.pkl")),
