@@ -16,7 +16,10 @@
 //! [`Evaluator::with_capabilities`]: crate::Evaluator::with_capabilities
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+#[cfg(feature = "native-io")]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 #[cfg(feature = "reqwest")]
 use std::sync::{Arc, OnceLock};
 #[cfg(feature = "http")]
@@ -226,7 +229,9 @@ pub struct FetchBudget {
 
 #[derive(Debug)]
 struct BudgetState {
-    remaining: AtomicU64,
+    /// A `Mutex` rather than an `AtomicU64`, which 32-bit targets such as
+    /// powerpc and mips lack.
+    remaining: Mutex<u64>,
     /// When set, the budget counts as spent.
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -244,7 +249,7 @@ impl FetchBudget {
     ) -> Self {
         Self {
             state: std::sync::Arc::new(BudgetState {
-                remaining: AtomicU64::new(bytes),
+                remaining: Mutex::new(bytes),
                 cancel,
             }),
         }
@@ -267,7 +272,7 @@ impl FetchBudget {
         if self.is_cancelled() {
             return 0;
         }
-        self.state.remaining.load(Ordering::Acquire)
+        *lock_budget(&self.state.remaining)
     }
 
     /// Whether no bytes are left, so no new request should start.
@@ -290,16 +295,18 @@ impl FetchBudget {
     /// Atomically replace the remaining bytes with `next(remaining)`, unless
     /// it returns `None`. Returns the new value.
     fn update(&self, next: impl Fn(u64) -> Option<u64>) -> Option<u64> {
-        let remaining = &self.state.remaining;
-        let mut left = remaining.load(Ordering::Acquire);
-        loop {
-            let new = next(left)?;
-            match remaining.compare_exchange_weak(left, new, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => return Some(new),
-                Err(actual) => left = actual,
-            }
-        }
+        let mut left = lock_budget(&self.state.remaining);
+        let new = next(*left)?;
+        *left = new;
+        Some(new)
     }
+}
+
+/// Lock the budget, ignoring poisoning: the guarded value is a plain integer.
+fn lock_budget(remaining: &Mutex<u64>) -> std::sync::MutexGuard<'_, u64> {
+    remaining
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The error for a URL a batch fetch skipped or dropped because its budget
@@ -955,7 +962,7 @@ mod reqwest_backend {
 }
 
 #[cfg(feature = "native-io")]
-static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "native-io")]
 fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {

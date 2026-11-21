@@ -1,8 +1,5 @@
 use rustc_hash::FxHashSet as HashSet;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 use serde_json::json;
@@ -21,7 +18,18 @@ pub(crate) const MAPPING_KEY_PREFIX: &str = "\0pklr:mapping-key:";
 
 // NaN does not equal itself, so each occurrence must be a different map key.
 // This ID is internal-only: the stored key still renders from `display`.
-static NEXT_NAN_MAPPING_KEY: AtomicU64 = AtomicU64::new(0);
+// A `Mutex` rather than an `AtomicU64`, which 32-bit targets such as powerpc
+// and mips lack.
+static NEXT_NAN_MAPPING_KEY: Mutex<u64> = Mutex::new(0);
+
+fn next_nan_mapping_key() -> u64 {
+    let mut next = NEXT_NAN_MAPPING_KEY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = *next;
+    *next += 1;
+    key
+}
 
 thread_local! {
     /// The values behind object, list and regex mapping keys, by storage key,
@@ -834,14 +842,14 @@ impl Duration {
         Self {
             value,
             unit,
-            nan_identity: NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+            nan_identity: next_nan_mapping_key(),
         }
     }
 
     fn with_mapping_identity(value: f64, unit: DurationUnit, identity: &str) -> Self {
         let (value, nan_identity) = mapping_nan_identity(identity)
             .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
-            .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
+            .unwrap_or_else(|| (value, next_nan_mapping_key()));
         Self {
             value,
             unit,
@@ -945,14 +953,14 @@ impl DataSize {
         Self {
             value,
             unit,
-            nan_identity: NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+            nan_identity: next_nan_mapping_key(),
         }
     }
 
     fn with_mapping_identity(value: f64, unit: DataSizeUnit, identity: &str) -> Self {
         let (value, nan_identity) = mapping_nan_identity(identity)
             .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
-            .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
+            .unwrap_or_else(|| (value, next_nan_mapping_key()));
         Self {
             value,
             unit,

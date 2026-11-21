@@ -52,9 +52,9 @@ pub(super) fn validate_package_bytes(url: &str, extension: &str, bytes: &[u8]) -
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
