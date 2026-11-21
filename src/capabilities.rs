@@ -17,7 +17,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "native-io")]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 #[cfg(feature = "reqwest")]
 use std::sync::{Arc, OnceLock};
 #[cfg(feature = "http")]
