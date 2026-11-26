@@ -2037,15 +2037,21 @@ pub(super) fn compose_amended_object(
 ) -> Arc<Property> {
     if let (None, Some(earlier), Some(body), None) =
         (&inherited.value, &inherited.body, &prop.body, &prop.value)
-        && (entries_are_listing_amendment(earlier) || entries_are_listing_amendment(body))
+        && (entries_add_elements(earlier) || entries_add_elements(body))
     {
-        // Two bodies that add elements: the second adds to what the first
-        // made, so the member is rebuilt from both, in order. Each body stays
-        // a layer of its own, so the `local`s of one never replace the
-        // other's. (A body-only member has no type annotation to keep.)
-        let base = Expr::New(None, earlier.clone(), Vec::new());
+        // Two bodies that add elements, at any depth: the second adds to what
+        // the first made, so the member is rebuilt from both, in order. Each
+        // body stays a layer of its own, so the `local`s of one never replace
+        // the other's. The first body amends the default of the type it
+        // carried over from a type-only declaration, so the member keeps its
+        // class and its entries their declared types.
+        let base = match &inherited.type_ann {
+            Some(ty) => Expr::InferredNew(ty.clone(), earlier.clone()),
+            None => Expr::New(None, earlier.clone(), Vec::new()),
+        };
         let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
         return Arc::new(Property {
+            type_ann: prop.type_ann.clone().or_else(|| inherited.type_ann.clone()),
             value: Some(Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay))),
             body: None,
             ..(**prop).clone()

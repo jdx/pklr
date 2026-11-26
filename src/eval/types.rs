@@ -1056,8 +1056,9 @@ pub(super) fn entries_define_members(entries: &[Entry]) -> bool {
 }
 
 /// Whether `entries`, or the body of a member they amend at any depth
-/// (`foo { bar { "x" } }`, `["k"] { "x" }`), add elements: evaluating such a
-/// body again on top of what it made adds them a second time.
+/// (`foo { bar { "x" } }`, `["k"] { "x" }`), add elements or spread a
+/// collection in (`...xs`): evaluating such a body again on top of what it
+/// made adds them a second time.
 pub(super) fn entries_add_elements(entries: &[Entry]) -> bool {
     entries_are_listing_amendment(entries)
         || entries.iter().any(|entry| match entry {
@@ -1070,6 +1071,9 @@ pub(super) fn entries_add_elements(entries: &[Entry]) -> bool {
             }
             Entry::DynProperty(_, Expr::ObjectBody(body))
             | Entry::Predicate(_, Expr::ObjectBody(body)) => entries_add_elements(body),
+            // What a spread adds is only known once it is evaluated, and a
+            // spread of a list adds elements.
+            Entry::Spread(_) => true,
             Entry::ForGenerator(generator) => entries_add_elements(&generator.body),
             Entry::WhenGenerator(generator) => {
                 entries_add_elements(&generator.body)
