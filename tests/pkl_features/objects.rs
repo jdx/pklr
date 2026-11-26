@@ -3404,6 +3404,65 @@ md { ["a"] { anything = 1 } }
 }
 
 #[test]
+fn non_open_class_rejects_undeclared_property_from_when_generator() {
+    for src in [
+        // An amend expression of an instance.
+        "class N { approve: Boolean = false }\nb = (new N {}) { when (true) { aprove = true } }\n",
+        // An entry of a typed mapping.
+        "class N { approve: Boolean = false }\nm: Mapping<String, N> = new { [\"a\"] { when (true) { aprove = true } } }\n",
+        // `new N { ... }`.
+        "class N { approve: Boolean = false }\nb = new N { when (true) { aprove = true } }\n",
+        // The `else` branch.
+        "class N { approve: Boolean = false }\nb = new N { when (false) { approve = true } else { aprove = true } }\n",
+        // A `when` nested in a `when`.
+        "class N { approve: Boolean = false }\nb = new N { when (true) { when (true) { aprove = true } } }\n",
+        // A `when` of an instance that takes its other branch once amended.
+        "class N { approve: Boolean = false }\na = new N { when (approve) { aprove = true } }\nb = (a) { approve = true }\n",
+    ] {
+        let msg = eval_fails(src);
+        assert!(
+            msg.contains("cannot add property 'aprove' to non-open class N"),
+            "{src}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn when_generator_adds_declared_local_and_open_members() {
+    let json = eval(
+        r#"
+open class P { base: Int = 1 }
+class N extends P { approve: Boolean = false; name: String = "x" }
+open class O { approve: Boolean = false }
+a = new N { when (true) { approve = true; local l = "y"; name = l; base = 2 } }
+b = (a) { when (false) { aprove = true } else { name = "z" } }
+c = new O { when (true) { extra = 1 } }
+d = new Dynamic { when (true) { extra = 1 } }
+m: Mapping<String, N> = new { ["a"] { when (true) { when (true) { approve = true } } } }
+e = new N { when (false) { aprove = true } }
+"#,
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({"approve": true, "base": 2, "name": "y"})
+    );
+    assert_eq!(
+        json["b"],
+        serde_json::json!({"approve": true, "base": 2, "name": "z"})
+    );
+    assert_eq!(json["c"], serde_json::json!({"approve": false, "extra": 1}));
+    assert_eq!(json["d"], serde_json::json!({"extra": 1}));
+    assert_eq!(
+        json["m"],
+        serde_json::json!({"a": {"approve": true, "base": 1, "name": "x"}})
+    );
+    assert_eq!(
+        json["e"],
+        serde_json::json!({"approve": false, "base": 1, "name": "x"})
+    );
+}
+
+#[test]
 fn non_open_class_allows_overrides() {
     let json = eval(
         r#"

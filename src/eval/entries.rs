@@ -1761,10 +1761,15 @@ impl Evaluator {
         m: &ObjectMap,
         source: Option<Arc<ObjectSource>>,
     ) -> Result<()> {
-        if let Some(inherited) = cx.inherited_source
-            && let Some(message) = immutable_copied_member_error(m.keys(), inherited)
-        {
-            return Err(Error::Eval(message));
+        if let Some(inherited) = cx.inherited_source {
+            if let Some(message) = immutable_copied_member_error(m.keys(), inherited) {
+                return Err(Error::Eval(message));
+            }
+            // A generator's properties are the amended instance's own, so a
+            // closed class refuses one it does not declare.
+            if !m.is_empty() {
+                check_generated_class_members(inherited, m)?;
+            }
         }
         if cx.track_dynamic_members {
             check_generated_duplicates(cx, entry_index, m)?;

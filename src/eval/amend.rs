@@ -1790,28 +1790,8 @@ fn check_closed_class_members(
     base_source: &ObjectSource,
     overlay_entries: &[Entry],
 ) -> Result<()> {
-    // A class extending `module` inherits declarations its source may not
-    // carry, so it is left alone, as `new C { ... }` leaves it.
-    if base_source.is_open
-        || base_source.is_module
-        || !matches!(base_source.kind, ObjectKind::Object | ObjectKind::Class)
-        || base_source.parent_type_names.iter().any(|n| n == "module")
-    {
+    let Some(type_name) = closed_class_name(base_source) else {
         return Ok(());
-    }
-    let Some(type_name) = &base_source.type_name else {
-        return Ok(());
-    };
-    let declared = |name: &str| {
-        base_source
-            .entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::Property(prop) if &*prop.name == name))
-            || base_map.contains_key(name)
-            || base_source
-                .evaluated_properties
-                .iter()
-                .any(|evaluated| &**evaluated == name)
     };
     for entry in overlay_entries {
         let name = match entry {
@@ -1819,13 +1799,65 @@ fn check_closed_class_members(
             Entry::DynProperty(Expr::String(key), _) => &**key,
             _ => continue,
         };
-        if !declared(name) {
-            return Err(Error::Eval(format!(
-                "cannot add property '{name}' to non-open class {type_name}"
-            )));
+        if !base_map.contains_key(name) && !class_declares(base_source, name) {
+            return Err(undeclared_property(name, type_name));
         }
     }
     Ok(())
+}
+
+/// Refuses a property that a `when` generator of an amendment adds to an
+/// instance of a non-open class, as [`check_closed_class_members`] refuses
+/// one written in the amendment itself. A generator's members are known only
+/// once its condition is evaluated, so they are checked as they are merged.
+#[inline(never)]
+pub(super) fn check_generated_class_members(
+    base_source: &ObjectSource,
+    generated: &ObjectMap,
+) -> Result<()> {
+    let Some(type_name) = closed_class_name(base_source) else {
+        return Ok(());
+    };
+    match generated
+        .keys()
+        .find(|name| !class_declares(base_source, name))
+    {
+        Some(name) => Err(undeclared_property(name, type_name)),
+        None => Ok(()),
+    }
+}
+
+/// The class of an object whose amendments may add no property: an instance
+/// (or the default) of a non-open class.
+fn closed_class_name(base_source: &ObjectSource) -> Option<&str> {
+    // A class extending `module` inherits declarations its source may not
+    // carry, so it is left alone, as `new C { ... }` leaves it.
+    if base_source.is_open
+        || base_source.is_module
+        || !matches!(base_source.kind, ObjectKind::Object | ObjectKind::Class)
+        || base_source.parent_type_names.iter().any(|n| n == "module")
+    {
+        return None;
+    }
+    base_source.type_name.as_deref()
+}
+
+/// Whether the source of a class instance declares or holds property `name`.
+fn class_declares(base_source: &ObjectSource, name: &str) -> bool {
+    base_source
+        .entries
+        .iter()
+        .any(|entry| matches!(entry, Entry::Property(prop) if &*prop.name == name))
+        || base_source
+            .evaluated_properties
+            .iter()
+            .any(|evaluated| &**evaluated == name)
+}
+
+fn undeclared_property(name: &str, type_name: &str) -> Error {
+    Error::Eval(format!(
+        "cannot add property '{name}' to non-open class {type_name}"
+    ))
 }
 
 /// The function `(function) { body }` evaluates to: one that calls `function`
