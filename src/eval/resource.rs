@@ -557,7 +557,7 @@ fn file_allowlist_matches(uri: &str, prefix: &str) -> bool {
             .strip_prefix(&prefix)
             .is_some_and(|remaining| remaining.starts_with('/'))
 }
-fn resource_value(uri: &str, bytes: &[u8]) -> Value {
+pub(super) fn resource_value(uri: &str, bytes: &[u8]) -> Value {
     let mut map = ObjectMap::default();
     map.insert("uri".into(), Value::String(uri.into()));
     map.insert(

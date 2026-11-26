@@ -526,7 +526,8 @@ impl Evaluator {
 
     /// Whether the resource reader for the scheme of `uri` serves a resource
     /// there that the resource policy allows. A refused or failed read counts
-    /// as absent, like any other triple-dot candidate.
+    /// as absent, like any other triple-dot candidate. A resource found is
+    /// cached, so the read that follows the search does not ask again.
     fn reader_resource_exists(&mut self, uri: &str) -> bool {
         let Some(scheme) = super::resource::uri_scheme(uri) else {
             return false;
@@ -534,10 +535,23 @@ impl Evaluator {
         let Some(reader) = self.resource_readers.get(scheme).map(Arc::clone) else {
             return false;
         };
-        if self.check_resource_allowed(uri).is_err() || self.check_cancelled().is_err() {
+        if self.check_resource_allowed(uri).is_err() {
             return false;
         }
-        matches!(reader.read_resource(uri), Ok(Some(_)))
+        if self.resource_cache.contains_key(uri) {
+            return true;
+        }
+        if self.check_cancelled().is_err() {
+            return false;
+        }
+        match reader.read_resource(uri) {
+            Ok(Some(bytes)) => {
+                let value = super::resource::resource_value(uri, &bytes);
+                self.resource_cache.insert(uri.to_string(), value);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The source a module reader serves for the virtual path `path`, read
@@ -611,7 +625,14 @@ impl Evaluator {
                         candidate.to_string_lossy().replace('\\', "/")
                     );
                     if resource && scheme != "modulepath" {
-                        return Ok(self.reader_resource_exists(&uri));
+                        // Probe the URI the read would ask for: normalized,
+                        // with its query or fragment.
+                        let full = format!("{uri}{suffix}");
+                        let full = normalize_module_path_uri(&full)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(full);
+                        return Ok(self.reader_resource_exists(&full));
                     }
                     Ok(self.module_path_file(&uri, resource).is_ok())
                 });

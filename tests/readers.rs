@@ -369,3 +369,94 @@ fn triple_dot_reads_skip_resources_the_policy_refuses() {
         .unwrap();
     assert_eq!(json, serde_json::json!({"text": "root"}));
 }
+
+#[test]
+fn a_used_encoded_reader_import_that_names_nothing_is_an_error() {
+    let dir = TestTempDir::new("pklr_reader_encoded_missing");
+    let main = dir.write("main.pkl", "import \"test:/%4Eope.pkl\"\nx = Nope.y\n");
+    let (reader, _) = modules(&[]);
+    let err = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .eval_to_json(&main)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Import not found: test:/%4Eope.pkl"), "{err}");
+}
+
+#[test]
+fn an_unused_reader_import_that_climbs_out_is_not_checked() {
+    let dir = TestTempDir::new("pklr_reader_unused_climb");
+    let main = dir.write("main.pkl", "import \"test:/../secret.pkl\"\nx = 1\n");
+    let (reader, reads) = modules(&[]);
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .allowed_modules(["file:".to_string()])
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"x": 1}));
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_unused_malformed_aliased_reader_import_is_still_reported() {
+    let dir = TestTempDir::new("pklr_reader_unused_opaque_alias");
+    let main = dir.write("main.pkl", "import \"test:Config\" as C\nx = 1\n");
+    let (reader, _) = modules(&[]);
+    let err = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .eval_to_json(&main)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("missing a `/`"), "{err}");
+}
+
+#[test]
+fn triple_dot_reads_probe_with_their_query() {
+    let dir = TestTempDir::new("pklr_reader_triple_dot_query");
+    let main = dir.write(
+        "main.pkl",
+        "import \"test:/a/b/Reads.pkl\"\ntext = Reads.text\n",
+    );
+    let (reader, _) = modules(&[(
+        "test:/a/b/Reads.pkl",
+        "text = read(\".../data.txt?v=1\").text\n",
+    )]);
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .resource_reader(
+            "test",
+            resources(&[
+                ("test:/a/data.txt?v=1", "near"),
+                ("test:/data.txt?v=1", "root"),
+            ]),
+        )
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"text": "near"}));
+}
+
+#[test]
+fn triple_dot_reads_ask_the_resource_reader_once_per_candidate() {
+    let dir = TestTempDir::new("pklr_reader_triple_dot_once");
+    let main = dir.write(
+        "main.pkl",
+        "import \"test:/a/b/Reads.pkl\"\ntext = Reads.text\n",
+    );
+    let (reader, _) = modules(&[(
+        "test:/a/b/Reads.pkl",
+        "text = read(\".../data.txt\").text\n",
+    )]);
+    let served = resources(&[("test:/a/data.txt", "near")]);
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let log = Arc::clone(&asked);
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .resource_reader("test", move |uri: &str| {
+            log.lock().unwrap().push(uri.to_string());
+            served(uri)
+        })
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"text": "near"}));
+    assert_eq!(*asked.lock().unwrap(), ["test:/a/data.txt"]);
+}
