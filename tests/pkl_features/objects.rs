@@ -8504,4 +8504,7 @@ readsSelf = new C { when (h == 1) { h = 5 } }
     assert_eq!(json["readsSelf"]["h"], 5);
     let err = eval_fails("class C { h: Int = 1 }\nc = new C { when (1) {} }\n");
     assert!(err.contains("Boolean"), "{err}");
+    let err =
+        eval_fails("class C { h: Int = 1 }\nc = new C { when (true) { h = 5; when (1) {} } }\n");
+    assert!(err.contains("Boolean"), "{err}");
 }

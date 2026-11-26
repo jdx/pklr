@@ -2656,7 +2656,10 @@ fn branch_assigns_only(body: &Body, names: &mut Vec<Arc<str>>) -> bool {
         }
         Entry::WhenGenerator(nested) => {
             let mut inner = Vec::new();
+            // A nested generator that assigns nothing would lose its
+            // condition, which must still be a Boolean.
             when_assigns_only(nested, &mut inner)
+                && !inner.is_empty()
                 && inner.iter().all(|name| !names.contains(name))
                 && {
                     names.extend(inner);
