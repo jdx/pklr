@@ -515,11 +515,23 @@ impl Evaluator {
         })
     }
 
+    /// The URI the relative reference `rel` names from the module at the
+    /// virtual path `module`, or `None` when `module` is not a reader module.
+    pub(super) fn reader_relative_uri(&mut self, module: &Path, rel: &str) -> Option<String> {
+        let base = self.reader_module_uri(module)?;
+        self.join_module_path_uri(&base, rel)
+    }
+
     /// The source a module reader serves for the virtual path `path`, read
     /// once per evaluator: `Some(Ok(None))` when the reader has no module
     /// there, and `None` when `path` is not a reader's virtual path.
     pub(super) fn reader_module_source(&mut self, path: &Path) -> Option<Result<Option<String>>> {
         let uri = self.reader_module_uri(path)?;
+        // Whatever URI reached this path (a `file:` URI can spell it too),
+        // the reader serves `uri`, so that is what the policy decides on.
+        if let Err(error) = self.check_module_allowed(&uri) {
+            return Some(Err(error));
+        }
         let key = absolute_clean(path);
         if let Some(source) = self.reader_sources.get(&key) {
             return Some(Ok(source.clone()));
@@ -543,7 +555,7 @@ impl Evaluator {
     /// (`modulepath:/../x.pkl`) names nothing and is not mistaken for a file
     /// inside the root. A triple-dot reference names the nearest ancestor
     /// directory that holds the file, or the root when none does.
-    fn join_module_path_uri(&mut self, base: &str, rel: &str) -> Option<String> {
+    pub(super) fn join_module_path_uri(&mut self, base: &str, rel: &str) -> Option<String> {
         let (rel_path, suffix) = split_query(rel);
         let scheme = super::resource::uri_scheme(base)?.to_string();
         let base_prefix = format!("{scheme}:/");
@@ -687,6 +699,9 @@ impl Evaluator {
     pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
         self.on_grown_stack(|this| {
             this.begin_evaluation();
+            if let Some(error) = &this.setup_error {
+                return Err(Error::Eval(error.clone()));
+            }
             this.check_module_path_allowed(path)?;
             let source = this.read_to_string_io(path)?;
             this.eval_source_inner(&source, path)

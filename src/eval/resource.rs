@@ -115,7 +115,9 @@ impl Evaluator {
         }
         let absolute = match uri_scheme(uri) {
             Some(_) => uri.to_string(),
-            None => match resolve_remote_relative(module, uri) {
+            None => match resolve_remote_relative(module, uri)
+                .or_else(|| self.reader_relative_uri(module, uri))
+            {
                 Some(remote) => remote,
                 None => {
                     // When no file URI can possibly be allowed, fail before
@@ -247,7 +249,10 @@ impl Evaluator {
         // never paths in the evaluator process' filesystem namespace.
         let resolved_remote = uri_scheme(pattern)
             .is_none()
-            .then(|| resolve_remote_relative(module, pattern))
+            .then(|| {
+                resolve_remote_relative(module, pattern)
+                    .or_else(|| self.reader_relative_uri(module, pattern))
+            })
             .flatten();
         let pattern = resolved_remote.as_deref().unwrap_or(pattern);
         let mut out = ObjectMap::default();

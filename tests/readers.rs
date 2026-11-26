@@ -122,7 +122,7 @@ fn missing_reader_module_is_an_error() {
 #[test]
 fn reader_errors_are_reported() {
     let dir = TestTempDir::new("pklr_reader_error");
-    let main = dir.write("main.pkl", "import \"test:/Config.pkl\"\nx = 1\n");
+    let main = dir.write("main.pkl", "import \"test:/Config.pkl\"\nx = Config\n");
     let err = EvaluatorBuilder::new()
         .module_reader("test", |_: &str| -> pklr::Result<Option<String>> {
             Err(pklr::Error::Eval("reader exploded".into()))
@@ -209,4 +209,76 @@ fn resource_scheme_respects_explicit_allowed_resources() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("data:/greeting.txt"), "{err}");
+}
+
+#[test]
+fn unused_reader_imports_are_not_read() {
+    let dir = TestTempDir::new("pklr_reader_unused");
+    let main = dir.write("main.pkl", "import \"test:/Config.pkl\"\nx = 1\n");
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", |_: &str| -> pklr::Result<Option<String>> {
+            Err(pklr::Error::Eval("reader exploded".into()))
+        })
+        .allowed_modules(["file:".to_string()])
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"x": 1}));
+}
+
+#[cfg(unix)]
+#[test]
+fn file_uris_cannot_reach_a_denied_reader() {
+    let dir = TestTempDir::new("pklr_reader_file_route");
+    let main = dir.write(
+        "main.pkl",
+        "import \"file:///.pklr-reader/test/Config.pkl\"\nport = Config.port\n",
+    );
+    let (reader, reads) = modules(LIB);
+    let result = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .allowed_modules(["file:".to_string()])
+        .eval_to_json(&main);
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn relative_reads_in_reader_modules_use_the_resource_reader() {
+    let dir = TestTempDir::new("pklr_reader_relative_read");
+    let main = dir.write(
+        "main.pkl",
+        "import \"test:/dir/Reads.pkl\"\ntext = Reads.text\n",
+    );
+    let (reader, _) = modules(&[("test:/dir/Reads.pkl", "text = read(\"data.txt\").text\n")]);
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .resource_reader("test", |uri: &str| -> pklr::Result<Option<Vec<u8>>> {
+            Ok(Some(format!("read {uri}").into_bytes()))
+        })
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"text": "read test:/dir/data.txt"}));
+}
+
+#[test]
+fn relative_reads_in_reader_modules_never_touch_files() {
+    let dir = TestTempDir::new("pklr_reader_relative_no_file");
+    let main = dir.write(
+        "main.pkl",
+        "import \"test:/dir/Reads.pkl\"\ntext = Reads.text\n",
+    );
+    let (reader, _) = modules(&[(
+        "test:/dir/Reads.pkl",
+        "text = read?(\"data.txt\")?.text ?? \"none\"\n",
+    )]);
+    let result = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .eval_to_json(&main)
+        .map_err(|e| e.to_string());
+    // Without a resource reader for `test:`, the read is refused or empty,
+    // but never a read of `/.pklr-reader/...` from the file system.
+    match result {
+        Ok(json) => assert_eq!(json, serde_json::json!({"text": "none"})),
+        Err(err) => assert!(err.contains("test:/dir/data.txt"), "{err}"),
+    }
 }

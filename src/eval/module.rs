@@ -2782,17 +2782,21 @@ impl Evaluator {
                 continue;
             }
 
-            // A `modulepath:` import that is used is checked by its URI before
-            // the module path is searched for it.
+            // A `modulepath:` or reader import that is used is checked by its
+            // URI before the module path or the reader is asked for it; one
+            // that is not used is never looked up.
             if self.is_path_scheme(uri) {
-                let name = uri.rsplit('/').next().unwrap_or_default();
+                // The module is named by its path alone, not a query or fragment.
+                let path_part = uri.split(['?', '#']).next().unwrap_or_default();
+                let name = path_part.rsplit('/').next().unwrap_or_default();
                 let alias = import
                     .alias
                     .as_deref()
                     .unwrap_or_else(|| name.strip_suffix(".pkl").unwrap_or(name));
-                if referenced_imports.contains(alias) {
-                    self.check_module_path_uri(uri)?;
+                if !referenced_imports.contains(alias) {
+                    continue;
                 }
+                self.check_module_path_uri(uri)?;
             }
             let import_path = match self.local_file_path(path, uri) {
                 Ok(import_path) => import_path,

@@ -302,7 +302,17 @@ impl Message {
                 .map(str::to_string)
                 .ok_or_else(|| invalid(format!("message {code:#x} has no string `{key}`")))
         };
-        let opt_string = |key: &str| get(key).and_then(Mp::as_str).map(str::to_string);
+        // A field that is present must have its type: a reader's error sent
+        // as binary must not read as no error at all.
+        let opt_string = |key: &str| -> io::Result<Option<String>> {
+            match get(key) {
+                None | Some(Mp::Nil) => Ok(None),
+                Some(value) => value
+                    .as_str()
+                    .map(|s| Some(s.to_string()))
+                    .ok_or_else(|| invalid(format!("message {code:#x} has no string `{key}`"))),
+            }
+        };
         let boolean = |value: &Mp, key: &str| {
             map_get(value, key)
                 .and_then(Mp::as_bool)
@@ -352,7 +362,7 @@ impl Message {
                     Some(_) => return Err(invalid("`contents` is not binary".to_string())),
                     None => None,
                 },
-                error: opt_string("error"),
+                error: opt_string("error")?,
             },
             0x28 => Self::ReadModuleRequest {
                 request_id: int("requestId")?,
@@ -362,8 +372,8 @@ impl Message {
             0x29 => Self::ReadModuleResponse {
                 request_id: int("requestId")?,
                 evaluator_id: int("evaluatorId")?,
-                contents: opt_string("contents"),
-                error: opt_string("error"),
+                contents: opt_string("contents")?,
+                error: opt_string("error")?,
             },
             0x2a => Self::ListResourcesRequest {
                 request_id: int("requestId")?,
@@ -374,7 +384,7 @@ impl Message {
                 request_id: int("requestId")?,
                 evaluator_id: int("evaluatorId")?,
                 path_elements: path_elements("pathElements")?,
-                error: opt_string("error"),
+                error: opt_string("error")?,
             },
             0x2c => Self::ListModulesRequest {
                 request_id: int("requestId")?,
@@ -385,7 +395,7 @@ impl Message {
                 request_id: int("requestId")?,
                 evaluator_id: int("evaluatorId")?,
                 path_elements: path_elements("pathElements")?,
-                error: opt_string("error"),
+                error: opt_string("error")?,
             },
             0x2e => Self::InitializeModuleReaderRequest {
                 request_id: int("requestId")?,
@@ -886,6 +896,22 @@ mod tests {
             error: None,
         });
         round_trip(Message::CloseExternalProcess);
+    }
+
+    #[test]
+    fn a_mistyped_error_is_not_read_as_no_error() {
+        let message = Mp::Array(vec![
+            Mp::from(0x29),
+            Mp::Map(vec![
+                (Mp::from("requestId"), Mp::from(1)),
+                (Mp::from("evaluatorId"), Mp::from(2)),
+                (Mp::from("error"), Mp::Binary(b"boom".to_vec())),
+            ]),
+        ]);
+        let mut bytes = Vec::new();
+        rmpv::encode::write_value(&mut bytes, &message).unwrap();
+        let error = read_message(&mut bytes.as_slice()).unwrap_err();
+        assert!(error.to_string().contains("`error`"), "{error}");
     }
 
     #[test]
