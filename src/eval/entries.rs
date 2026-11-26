@@ -389,6 +389,19 @@ impl Evaluator {
                     depth,
                 )?));
             }
+            // A body amending a property of a class type that holds no value
+            // (one evaluated again after it failed) amends the class's
+            // default, as it does when the value is there, not a `Dynamic`.
+            if amendment_base.is_none()
+                && let Some(ty) = &prop.type_ann
+                && let Some(Value::Object(map, Some(source))) = type_default_value(ty, scope)
+                && source.type_name.is_some()
+                && matches!(source.kind, ObjectKind::Object | ObjectKind::Class)
+            {
+                return Ok(Some(
+                    self.eval_amended_object(&map, &source, body, scope, depth)?,
+                ));
+            }
             let mut body_scope = scope.child();
             body_scope.set("super", Value::Object(Arc::default(), None));
             let val = self.eval_entries(body, &body_scope, depth)?;
