@@ -8484,3 +8484,24 @@ c = new C { when (true) { h = 4 }; when (true) { h = 5 } }
     );
     assert!(err.contains("Duplicate definition of member `h`"), "{err}");
 }
+
+// Generators the rewrite leaves alone still run as generators: two that
+// assign one member where only one branch is taken, a body amendment of a
+// null default, a condition that reads the object's own members, and an empty
+// generator, whose condition must still be a Boolean.
+#[test]
+fn when_generators_left_as_generators_still_evaluate() {
+    let json = eval(
+        r#"
+class C { h: Int = 1; y: Int = h; d: Dynamic? = null }
+exclusive = new C { when (false) { h = 4 }; when (true) { h = 5 } }
+nullBody = new C { when (true) { d { a = 1 } } }
+readsSelf = new C { when (h == 1) { h = 5 } }
+"#,
+    );
+    assert_eq!(json["exclusive"]["h"], 5);
+    assert_eq!(json["nullBody"]["d"], serde_json::json!({"a": 1}));
+    assert_eq!(json["readsSelf"]["h"], 5);
+    let err = eval_fails("class C { h: Int = 1 }\nc = new C { when (1) {} }\n");
+    assert!(err.contains("Boolean"), "{err}");
+}

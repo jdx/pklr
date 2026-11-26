@@ -2552,6 +2552,22 @@ fn lift_when_overrides(base: &[Entry], overlay: &[Entry]) -> Option<Vec<Entry>> 
             .iter()
             .any(|entry| matches!(entry, Entry::Property(prop) if &*prop.name == name))
     };
+    let assigned_by_another = |this: &Entry, name: &str| {
+        overlay.iter().any(|other| {
+            !std::ptr::eq(other, this)
+                && matches!(other, Entry::WhenGenerator(generator) if when_mentions(generator, name))
+        })
+    };
+    // A rewritten condition is evaluated as part of the member, where a name
+    // the object declares means that member, not what the generator's head
+    // would read.
+    let reads_member = |ident: &str| {
+        matches!(ident, "this" | "super")
+            || base
+                .iter()
+                .chain(overlay)
+                .any(|entry| matches!(entry, Entry::Property(prop) if &*prop.name == ident))
+    };
     let mut lifted_any = false;
     let mut out = Vec::with_capacity(overlay.len());
     for entry in overlay {
@@ -2560,19 +2576,17 @@ fn lift_when_overrides(base: &[Entry], overlay: &[Entry]) -> Option<Vec<Entry>> 
             continue;
         };
         let mut names = Vec::new();
+        // A generator that assigns nothing keeps its condition, which must
+        // still be a Boolean. One that shares a member with another generator
+        // stays one, so the duplicate is reported only when both branches
+        // that assign it are taken.
         if !when_assigns_only(generator, &mut names)
-            || names
-                .iter()
-                .any(|name| !declared(name) || assigned_directly(name))
+            || names.is_empty()
+            || names.iter().any(|name| {
+                !declared(name) || assigned_directly(name) || assigned_by_another(entry, name)
+            })
+            || !conditions_read_outside(generator, &reads_member)
         {
-            out.push(entry.clone());
-            continue;
-        }
-        // Two generators that assign the same member make a duplicate, which
-        // evaluating them as generators reports.
-        if out.iter().any(|lifted: &Entry| {
-            matches!(lifted, Entry::Property(prop) if names.iter().any(|name| **name == *prop.name))
-        }) {
             out.push(entry.clone());
             continue;
         }
@@ -2630,7 +2644,10 @@ fn branch_assigns_only(body: &Body, names: &mut Vec<Arc<str>>) -> bool {
                 && prop.annotations.is_empty()
                 && prop.type_ann.is_none()
                 && !prop.is_method
-                && (prop.value.is_some() || prop.body.is_some())
+                // `h { ... }` amends what `h` is at that point, which for a
+                // null default is a new `Dynamic`; it stays a generator.
+                && prop.value.is_some()
+                && prop.body.is_none()
                 && !names.contains(&prop.name)
                 && {
                     names.push(prop.name.clone());
@@ -2661,17 +2678,7 @@ fn when_value(
     let branch = |body: Option<&Body>| -> Option<Expr> {
         let assigned = body.and_then(|body| {
             body.iter().find_map(|entry| match entry {
-                Entry::Property(prop) if &*prop.name == name => {
-                    Some(Some(match (&prop.value, &prop.body) {
-                        (Some(value), _) => value.clone(),
-                        (None, Some(body)) => Expr::Binop(
-                            BinOp::Add,
-                            Box::new(super_member(name)),
-                            Box::new(Expr::ObjectBody(body.clone())),
-                        ),
-                        (None, None) => unreachable!("only assignments are lifted"),
-                    }))
-                }
+                Entry::Property(prop) if &*prop.name == name => Some(prop.value.clone()),
                 Entry::WhenGenerator(nested) if when_mentions(nested, name) => {
                     Some(when_value(nested, name, base_has_value))
                 }
@@ -2704,4 +2711,29 @@ fn when_mentions(generator: &crate::parser::WhenGenerator, name: &str) -> bool {
 
 fn super_member(name: &str) -> Expr {
     Expr::Field(Box::new(Expr::Ident("super".into())), name.into())
+}
+
+/// Whether no condition of `generator`, nested ones included, names anything
+/// `reads_member` says the object itself declares.
+fn conditions_read_outside(
+    generator: &crate::parser::WhenGenerator,
+    reads_member: &dyn Fn(&str) -> bool,
+) -> bool {
+    !super::analysis::expr_mentions(&generator.condition, &MemberNames(reads_member))
+        && [Some(&generator.body), generator.else_body.as_ref()]
+            .into_iter()
+            .flatten()
+            .flat_map(|body| body.iter())
+            .all(|entry| match entry {
+                Entry::WhenGenerator(nested) => conditions_read_outside(nested, reads_member),
+                _ => true,
+            })
+}
+
+struct MemberNames<'a>(&'a dyn Fn(&str) -> bool);
+
+impl super::analysis::Needle for MemberNames<'_> {
+    fn is(&self, ident: &str) -> bool {
+        (self.0)(ident)
+    }
 }
