@@ -1055,6 +1055,33 @@ pub(super) fn entries_define_members(entries: &[Entry]) -> bool {
     })
 }
 
+/// Whether `entries`, or the body of a member they amend at any depth
+/// (`foo { bar { "x" } }`, `["k"] { "x" }`), add elements: evaluating such a
+/// body again on top of what it made adds them a second time.
+pub(super) fn entries_add_elements(entries: &[Entry]) -> bool {
+    entries_are_listing_amendment(entries)
+        || entries.iter().any(|entry| match entry {
+            Entry::Property(prop) => {
+                prop.value.is_none()
+                    && prop
+                        .body
+                        .as_deref()
+                        .is_some_and(|body| entries_add_elements(body))
+            }
+            Entry::DynProperty(_, Expr::ObjectBody(body))
+            | Entry::Predicate(_, Expr::ObjectBody(body)) => entries_add_elements(body),
+            Entry::ForGenerator(generator) => entries_add_elements(&generator.body),
+            Entry::WhenGenerator(generator) => {
+                entries_add_elements(&generator.body)
+                    || generator
+                        .else_body
+                        .as_deref()
+                        .is_some_and(|body| entries_add_elements(body))
+            }
+            _ => false,
+        })
+}
+
 pub(super) fn entries_are_listing_amendment(entries: &[Entry]) -> bool {
     entries.iter().any(|entry| match entry {
         Entry::Elem(_) => true,

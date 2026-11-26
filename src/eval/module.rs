@@ -1747,7 +1747,7 @@ impl Evaluator {
                 let mut fresh_scope = None;
                 if prop.value.is_none()
                     && let Some(body) = &prop.body
-                    && entries_are_listing_amendment(body)
+                    && entries_add_elements(body)
                     && scope.vars.contains_key(prop.name.as_ref())
                 {
                     let reads = referenced_roots(body);
@@ -1764,9 +1764,7 @@ impl Evaluator {
                         .find(|other| other.name == prop.name)
                         .is_some_and(|other| std::ptr::eq(&**other, &**prop));
                     if first {
-                        let mut fresh = scope.clone();
-                        Arc::make_mut(&mut fresh.vars).shift_remove(prop.name.as_ref());
-                        fresh_scope = Some(fresh);
+                        fresh_scope = Some(self.declared_amendment_scope(prop, scope, depth));
                     }
                 }
                 match self.eval_property_with(
@@ -1816,6 +1814,14 @@ impl Evaluator {
                 {
                     continue;
                 }
+                // A body that adds elements amends the base's member, not what
+                // an earlier pass made of it, which already holds them.
+                let base_scope = prop
+                    .value
+                    .is_none()
+                    .then(|| base_amendment_scope(prop, scope))
+                    .flatten();
+                let eval_scope = base_scope.as_ref().unwrap_or(scope);
                 // What it reads through `super` is the base's member as this
                 // module's members late bind it.
                 let super_scope = super_bound
@@ -1832,14 +1838,19 @@ impl Evaluator {
                                     *value = current.clone();
                                 }
                             }
-                            let mut overlay = scope.clone();
+                            let mut overlay = eval_scope.clone();
                             overlay.set("super", Value::Object(Arc::new(members), source.clone()));
                             Some(overlay)
                         }
                         _ => None,
                     });
                 match self
-                    .eval_property_with(prop, super_scope.as_ref().unwrap_or(scope), depth, true)
+                    .eval_property_with(
+                        prop,
+                        super_scope.as_ref().unwrap_or(eval_scope),
+                        depth,
+                        true,
+                    )
                     .and_then(|value| {
                         if synthesized_inherited_types.contains(prop.name.as_ref())
                             && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
@@ -1909,6 +1920,25 @@ impl Evaluator {
             }
         }
         Ok(deferred)
+    }
+
+    /// The scope an inherited body that adds elements is evaluated in anew:
+    /// `scope` without the member, which the body would otherwise amend a
+    /// second time, or with its declared type's default in its place.
+    #[inline(never)]
+    fn declared_amendment_scope(&mut self, prop: &Property, scope: &Scope, depth: usize) -> Scope {
+        let mut fresh = scope.clone();
+        Arc::make_mut(&mut fresh.vars).shift_remove(prop.name.as_ref());
+        if prop.type_ann.is_some() {
+            let declared = Property {
+                body: None,
+                ..prop.clone()
+            };
+            if let Ok(Some(default)) = self.eval_property_with(&declared, &fresh, depth, false) {
+                fresh.set(&prop.name, default);
+            }
+        }
+        fresh
     }
 
     /// Evaluate locals, classes, type aliases and properties in dependency
@@ -3719,4 +3749,22 @@ fn without_default_marks(ty: &crate::parser::TypeExpr) -> crate::parser::TypeExp
             TypeExpr::Constrained(bare(base), constraint.clone(), *form)
         }
     }
+}
+
+/// The scope this module's own body `prop` is evaluated in again when it adds
+/// elements: with the base module's member in place of what an earlier pass
+/// made of it, which already holds them.
+#[inline(never)]
+fn base_amendment_scope(prop: &Property, scope: &Scope) -> Option<Scope> {
+    let body = prop.body.as_ref()?;
+    if !entries_add_elements(body) {
+        return None;
+    }
+    let Some(Value::Object(members, _)) = scope.get("super") else {
+        return None;
+    };
+    let base = members.get(prop.name.as_ref())?;
+    let mut fresh = scope.clone();
+    fresh.set(&prop.name, base.clone());
+    Some(fresh)
 }

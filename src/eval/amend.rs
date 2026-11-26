@@ -2052,6 +2052,21 @@ pub(super) fn compose_amended_object(
         });
     }
     let (Some(base), Some(body), None) = (&inherited.value, &prop.body, &prop.value) else {
+        // A body amending a member declared with only a type keeps that type,
+        // so evaluating the member anew builds the declared class.
+        if let (None, None, Some(ty), None, None) = (
+            &inherited.value,
+            &inherited.body,
+            &inherited.type_ann,
+            &prop.value,
+            &prop.type_ann,
+        ) && prop.body.is_some()
+        {
+            return Arc::new(Property {
+                type_ann: Some(ty.clone()),
+                ..(**prop).clone()
+            });
+        }
         return prop.clone();
     };
     if !builds_amendable_object(base) {
