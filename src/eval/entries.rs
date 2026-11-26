@@ -1800,6 +1800,13 @@ impl Evaluator {
         );
         st.generated.extend(m.keys().cloned());
         extend_object_entries(&mut st.map, m, cx.mapping_entries);
+        // A generator that assigns a member the base declares `hidden` keeps
+        // it out of the output, as assigning it directly does.
+        if !cx.mapping_entries
+            && let Some(inherited) = cx.inherited_source
+        {
+            drop_hidden_generated_members(&mut st.map, m, &inherited.entries);
+        }
         st.member_entry_indices
             .extend(m.keys().cloned().map(|key| (key, entry_index)));
         if let Some(source) = source {
@@ -2599,4 +2606,20 @@ fn names_constrained_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) -> boo
         }
     }
     false
+}
+
+/// Remove from `map` the members of `generated` that `base` declares hidden.
+#[inline(never)]
+fn drop_hidden_generated_members(map: &mut ObjectMap, generated: &ObjectMap, base: &[Entry]) {
+    for key in generated.keys() {
+        let hidden = base.iter().any(|entry| {
+            matches!(entry, Entry::Property(prop)
+                if *prop.name == **key
+                    && has_modifier(&prop.modifiers, Modifier::Hidden)
+                    && !has_modifier(&prop.modifiers, Modifier::Local))
+        });
+        if hidden {
+            map.shift_remove(key);
+        }
+    }
 }

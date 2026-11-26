@@ -125,6 +125,8 @@ impl Evaluator {
             );
         }
         check_stale_class_read(base_map, base_source, overlay_entries, current_scope)?;
+        let lifted = lift_when_overrides(&base_source.entries, overlay_entries);
+        let overlay_entries = lifted.as_deref().unwrap_or(overlay_entries);
         if let Some(value) = self.try_eval_simple_class_amendment(
             base_map,
             base_source,
@@ -2509,4 +2511,197 @@ fn check_stale_class_read(
         }
     }
     Ok(())
+}
+
+/// The overlay with each `when` generator that only assigns properties the
+/// base declares rewritten as those properties, each choosing its value by
+/// the generator's condition, or `None` when no generator qualifies.
+///
+/// `when (c) { h = 5 }` overrides the base's `h` as `h = 5` does: it takes the
+/// base member's place, so the base members that read `h` see the new value,
+/// and keeps the base member's `hidden`. As a generated member it would be
+/// added after the base's members instead, too late for them to read.
+#[inline(never)]
+fn lift_when_overrides(base: &[Entry], overlay: &[Entry]) -> Option<Vec<Entry>> {
+    if !overlay
+        .iter()
+        .any(|entry| matches!(entry, Entry::WhenGenerator(_)))
+    {
+        return None;
+    }
+    let declared = |name: &str| {
+        base.iter().any(|entry| {
+            matches!(entry, Entry::Property(prop)
+            if &*prop.name == name
+                && !prop.is_method
+                // A `fixed` or `const` member rejects an override only
+                // where the generator's branch that assigns it is taken.
+                && !prop.modifiers.iter().any(|modifier| {
+                    matches!(modifier, Modifier::Local | Modifier::Fixed | Modifier::Const)
+                }))
+        })
+    };
+    let has_value = |name: &str| {
+        base.iter().any(|entry| {
+            matches!(entry, Entry::Property(prop)
+                if &*prop.name == name && (prop.value.is_some() || prop.body.is_some()))
+        })
+    };
+    let assigned_directly = |name: &str| {
+        overlay
+            .iter()
+            .any(|entry| matches!(entry, Entry::Property(prop) if &*prop.name == name))
+    };
+    let mut lifted_any = false;
+    let mut out = Vec::with_capacity(overlay.len());
+    for entry in overlay {
+        let Entry::WhenGenerator(generator) = entry else {
+            out.push(entry.clone());
+            continue;
+        };
+        let mut names = Vec::new();
+        if !when_assigns_only(generator, &mut names)
+            || names
+                .iter()
+                .any(|name| !declared(name) || assigned_directly(name))
+        {
+            out.push(entry.clone());
+            continue;
+        }
+        // Two generators that assign the same member make a duplicate, which
+        // evaluating them as generators reports.
+        if out.iter().any(|lifted: &Entry| {
+            matches!(lifted, Entry::Property(prop) if names.iter().any(|name| **name == *prop.name))
+        }) {
+            out.push(entry.clone());
+            continue;
+        }
+        // A branch that leaves a member alone keeps the base's value, which a
+        // member declared with only a type may not have.
+        let values: Option<Vec<Expr>> = names
+            .iter()
+            .map(|name| when_value(generator, name, has_value(name)))
+            .collect();
+        let Some(values) = values else {
+            out.push(entry.clone());
+            continue;
+        };
+        lifted_any = true;
+        for (name, value) in names.into_iter().zip(values) {
+            out.push(Entry::Property(Arc::new(Property {
+                annotations: Vec::new(),
+                doc: None,
+                modifiers: Vec::new(),
+                value: Some(value),
+                name,
+                type_ann: None,
+                body: None,
+                is_method: false,
+            })));
+        }
+    }
+    lifted_any.then_some(out)
+}
+
+/// Whether `generator`'s branches hold only plain property assignments and
+/// generators like it, each member assigned at most once per branch. The
+/// names assigned are added to `names` in the order they first appear.
+fn when_assigns_only(generator: &crate::parser::WhenGenerator, names: &mut Vec<Arc<str>>) -> bool {
+    [Some(&generator.body), generator.else_body.as_ref()]
+        .into_iter()
+        .flatten()
+        .all(|body| {
+            let mut branch = Vec::new();
+            branch_assigns_only(body, &mut branch) && {
+                for name in branch {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                true
+            }
+        })
+}
+
+fn branch_assigns_only(body: &Body, names: &mut Vec<Arc<str>>) -> bool {
+    body.iter().all(|entry| match entry {
+        Entry::Property(prop) => {
+            prop.modifiers.is_empty()
+                && prop.annotations.is_empty()
+                && prop.type_ann.is_none()
+                && !prop.is_method
+                && (prop.value.is_some() || prop.body.is_some())
+                && !names.contains(&prop.name)
+                && {
+                    names.push(prop.name.clone());
+                    true
+                }
+        }
+        Entry::WhenGenerator(nested) => {
+            let mut inner = Vec::new();
+            when_assigns_only(nested, &mut inner)
+                && inner.iter().all(|name| !names.contains(name))
+                && {
+                    names.extend(inner);
+                    true
+                }
+        }
+        _ => false,
+    })
+}
+
+/// The value `generator` gives the member `name`: what the branch taken
+/// assigns, or the base's value where that branch leaves it alone. `None`
+/// where a branch leaves it alone and the base gives it no value to keep.
+fn when_value(
+    generator: &crate::parser::WhenGenerator,
+    name: &str,
+    base_has_value: bool,
+) -> Option<Expr> {
+    let branch = |body: Option<&Body>| -> Option<Expr> {
+        let assigned = body.and_then(|body| {
+            body.iter().find_map(|entry| match entry {
+                Entry::Property(prop) if &*prop.name == name => {
+                    Some(Some(match (&prop.value, &prop.body) {
+                        (Some(value), _) => value.clone(),
+                        (None, Some(body)) => Expr::Binop(
+                            BinOp::Add,
+                            Box::new(super_member(name)),
+                            Box::new(Expr::ObjectBody(body.clone())),
+                        ),
+                        (None, None) => unreachable!("only assignments are lifted"),
+                    }))
+                }
+                Entry::WhenGenerator(nested) if when_mentions(nested, name) => {
+                    Some(when_value(nested, name, base_has_value))
+                }
+                _ => None,
+            })
+        });
+        match assigned {
+            Some(value) => value,
+            None => base_has_value.then(|| super_member(name)),
+        }
+    };
+    Some(Expr::If(
+        Box::new(generator.condition.clone()),
+        Box::new(branch(Some(&generator.body))?),
+        Box::new(branch(generator.else_body.as_ref())?),
+    ))
+}
+
+fn when_mentions(generator: &crate::parser::WhenGenerator, name: &str) -> bool {
+    [Some(&generator.body), generator.else_body.as_ref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|body| body.iter())
+        .any(|entry| match entry {
+            Entry::Property(prop) => &*prop.name == name,
+            Entry::WhenGenerator(nested) => when_mentions(nested, name),
+            _ => false,
+        })
+}
+
+fn super_member(name: &str) -> Expr {
+    Expr::Field(Box::new(Expr::Ident("super".into())), name.into())
 }

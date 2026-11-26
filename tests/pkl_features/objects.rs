@@ -8432,3 +8432,55 @@ fn map_spread_into_listing_names_map_and_int_seq_has_no_to_map() {
     assert!(v["a"].as_str().unwrap().contains("type `Map`"), "{v}");
     assert!(v["b"].as_str().is_some(), "{v}");
 }
+
+// A `when` generator that assigns a member the class declares `hidden` keeps
+// it out of the output, and the members that read it see the new value, as
+// they do when the member is assigned directly.
+#[test]
+fn hidden_member_assigned_in_when_stays_hidden_and_is_read_late() {
+    let json = eval(
+        r#"
+class C {
+    hidden h: Int = 1
+    y: Int = h
+    d: Dynamic = new { a = 1 }
+}
+class T { hidden t: Int; z: Int = 0 }
+then = new C { when (true) { h = 5 } }
+otherwise = new C { when (false) { y = 0 } else { h = 7 } }
+nested = new C { when (true) { when (true) { h = 8 } } }
+untaken = new C { when (false) { h = 9 } }
+body = new C { when (true) { d { b = 2 } } }
+typeOnly = new T { when (true) { t = 3 } }
+readBack = typeOnly.t
+dyn = new Dynamic { k = 1; w = k }
+amended = (dyn) { when (true) { k = 4 } }
+"#,
+    );
+    assert_eq!(json["then"], serde_json::json!({"y": 5, "d": {"a": 1}}));
+    assert_eq!(
+        json["otherwise"],
+        serde_json::json!({"y": 7, "d": {"a": 1}})
+    );
+    assert_eq!(json["nested"], serde_json::json!({"y": 8, "d": {"a": 1}}));
+    assert_eq!(json["untaken"], serde_json::json!({"y": 1, "d": {"a": 1}}));
+    assert_eq!(
+        json["body"],
+        serde_json::json!({"y": 1, "d": {"a": 1, "b": 2}})
+    );
+    assert_eq!(json["typeOnly"], serde_json::json!({"z": 0}));
+    assert_eq!(json["readBack"], 3);
+    assert_eq!(json["amended"], serde_json::json!({"k": 4, "w": 4}));
+}
+
+// Two generators that assign the same member are still a duplicate.
+#[test]
+fn two_when_generators_assigning_one_member_are_a_duplicate() {
+    let err = eval_fails(
+        r#"
+class C { hidden h: Int = 1; y: Int = h }
+c = new C { when (true) { h = 4 }; when (true) { h = 5 } }
+"#,
+    );
+    assert!(err.contains("Duplicate definition of member `h`"), "{err}");
+}
