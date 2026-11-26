@@ -645,7 +645,7 @@ impl Evaluator {
             // A relative reference from a module path module is a `modulepath:`
             // URI, which names nothing when no module path directory has it.
             let resolved = self.resolve_relative(path, uri);
-            if let Some(uri) = resolved.as_deref().filter(|u| u.starts_with("modulepath:")) {
+            if let Some(uri) = resolved.as_deref().filter(|u| self.is_path_scheme(u)) {
                 match self.local_file_path(path, uri) {
                     Ok(found) => inherited_local_paths.push(found),
                     Err(Error::ImportNotFound(_)) => {}
@@ -2784,7 +2784,7 @@ impl Evaluator {
 
             // A `modulepath:` import that is used is checked by its URI before
             // the module path is searched for it.
-            if uri.starts_with("modulepath:") {
+            if self.is_path_scheme(uri) {
                 let name = uri.rsplit('/').next().unwrap_or_default();
                 let alias = import
                     .alias
@@ -2798,7 +2798,7 @@ impl Evaluator {
                 Ok(import_path) => import_path,
                 // A `modulepath:` URI naming nothing is an error only if the
                 // import is used, like any other missing local import.
-                Err(error @ Error::ImportNotFound(_)) if uri.starts_with("modulepath:") => {
+                Err(error @ Error::ImportNotFound(_)) if self.is_path_scheme(uri) => {
                     let alias = import.alias.clone().unwrap_or_else(|| {
                         let name = uri.rsplit('/').next().unwrap_or_default();
                         name.strip_suffix(".pkl").unwrap_or(name).to_string()

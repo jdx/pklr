@@ -34,7 +34,9 @@ impl Evaluator {
         };
         // A local path becomes a `file:` URI; a namespace with a scheme is one.
         let as_uri = |namespace: &str| {
-            if namespace.contains("://")
+            if let Some(uri) = self.reader_module_uri(std::path::Path::new(namespace)) {
+                uri
+            } else if namespace.contains("://")
                 || namespace.starts_with("modulepath:")
                 || namespace.starts_with("pkl:")
             {

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const DEFAULT_ALLOWED_RESOURCES: &[&str] = &[
+pub(crate) const DEFAULT_ALLOWED_RESOURCES: &[&str] = &[
     "prop:",
     "env:",
     "file:",
@@ -54,6 +54,14 @@ impl Evaluator {
                 }
                 Err(error) => Err(error),
             },
+            Target::Reader(uri) => {
+                let scheme = uri_scheme(&uri).unwrap_or_default();
+                let reader = Arc::clone(&self.resource_readers[scheme]);
+                self.check_cancelled()?;
+                Ok(reader
+                    .read_resource(&uri)?
+                    .map(|bytes| resource_value(&uri, &bytes)))
+            }
             Target::Unreadable => Ok(None),
         };
         if let Some(value) = value? {
@@ -151,6 +159,7 @@ impl Evaluator {
                 Some((path, uri)) => Target::File { path, uri },
                 None => Target::Unreadable,
             },
+            scheme if self.resource_readers.contains_key(scheme) => Target::Reader(absolute),
             _ => Target::Unreadable,
         })
     }
@@ -323,8 +332,13 @@ impl Evaluator {
 enum Target {
     Env(String),
     Prop(String),
-    File { path: PathBuf, uri: String },
+    File {
+        path: PathBuf,
+        uri: String,
+    },
     Remote(String),
+    /// A URI under a scheme with a resource reader.
+    Reader(String),
     Unreadable,
 }
 
@@ -333,7 +347,7 @@ impl Target {
         match self {
             Self::Env(name) => format!("env:{name}"),
             Self::Prop(name) => format!("prop:{name}"),
-            Self::File { uri, .. } | Self::Remote(uri) => uri.clone(),
+            Self::File { uri, .. } | Self::Remote(uri) | Self::Reader(uri) => uri.clone(),
             Self::Unreadable => "unreadable:".to_string(),
         }
     }

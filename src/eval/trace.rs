@@ -17,6 +17,9 @@ impl Evaluator {
         if module.contains("://") {
             return module.to_string();
         }
+        if let Some(uri) = self.reader_module_uri(Path::new(module)) {
+            return uri;
+        }
         let path = PathBuf::from(module);
         let path = match self.canonicalize_io(&path) {
             Ok(path) => path,
