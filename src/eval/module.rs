@@ -645,7 +645,7 @@ impl Evaluator {
             // A relative reference from a module path module is a `modulepath:`
             // URI, which names nothing when no module path directory has it.
             let resolved = self.resolve_relative(path, uri);
-            if let Some(uri) = resolved.as_deref().filter(|u| u.starts_with("modulepath:")) {
+            if let Some(uri) = resolved.as_deref().filter(|u| self.is_path_scheme(u)) {
                 match self.local_file_path(path, uri) {
                     Ok(found) => inherited_local_paths.push(found),
                     Err(Error::ImportNotFound(_)) => {}
@@ -2782,37 +2782,23 @@ impl Evaluator {
                 continue;
             }
 
-            // A `modulepath:` import that is used is checked by its URI before
-            // the module path is searched for it.
-            if uri.starts_with("modulepath:") {
-                let name = uri.rsplit('/').next().unwrap_or_default();
-                let alias = import
-                    .alias
-                    .as_deref()
-                    .unwrap_or_else(|| name.strip_suffix(".pkl").unwrap_or(name));
-                if referenced_imports.contains(alias) {
-                    self.check_module_path_uri(uri)?;
-                }
-            }
-            let import_path = match self.local_file_path(path, uri) {
-                Ok(import_path) => import_path,
-                // A `modulepath:` URI naming nothing is an error only if the
-                // import is used, like any other missing local import.
-                Err(error @ Error::ImportNotFound(_)) if uri.starts_with("modulepath:") => {
-                    let alias = import.alias.clone().unwrap_or_else(|| {
-                        let name = uri.rsplit('/').next().unwrap_or_default();
-                        name.strip_suffix(".pkl").unwrap_or(name).to_string()
-                    });
-                    if referenced_imports.contains(alias.as_str()) {
-                        return Err(error);
-                    }
+            // A `modulepath:` or reader import that is used is checked by its
+            // URI before the module path or the reader is asked for it; one
+            // that is not used is never looked up. A malformed URI is reported
+            // either way.
+            let path_alias = if self.is_path_scheme(uri) {
+                let alias = path_scheme_import_alias(import.alias.as_deref(), uri)?;
+                if !referenced_imports.contains(alias.as_str()) {
                     continue;
                 }
-                Err(error) => return Err(error),
+                self.check_module_path_uri(uri)?;
+                Some(alias)
+            } else {
+                None
             };
-            let alias = import
-                .alias
-                .clone()
+            let import_path = self.local_file_path(path, uri)?;
+            let alias = path_alias
+                .or_else(|| import.alias.clone())
                 .unwrap_or_else(|| default_import_alias(&import_path));
             if !referenced_imports.contains(alias.as_str()) {
                 // Unused imports are intentionally lazy: missing local paths are
@@ -2862,6 +2848,33 @@ fn default_import_alias(import_path: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+/// The name an import of the `modulepath:` or reader URI `uri` binds: its
+/// `as` alias, or else the stem of the URI's decoded, normalized last path
+/// segment, which is the file a resolved import is named by. A malformed URI
+/// is an error whether or not the import has an alias; one that climbs out of
+/// its root is named by its decoded last segment, and found to name nothing
+/// only if it is used.
+fn path_scheme_import_alias(alias: Option<&str>, uri: &str) -> Result<String> {
+    let last = match super::loading::module_path_segments(uri) {
+        Ok(mut segments) => segments.pop(),
+        Err(Error::ImportNotFound(_)) => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(alias) = alias {
+        return Ok(alias.to_string());
+    }
+    let last = last.unwrap_or_else(|| {
+        let path = uri.split(['?', '#']).next().unwrap_or_default();
+        let decoded = super::resource::percent_decode(path);
+        decoded
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    });
+    Ok(default_import_alias(Path::new(&last)))
 }
 
 /// The name an import without an `as` alias binds, for the URIs that are not

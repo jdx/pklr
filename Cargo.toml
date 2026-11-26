@@ -36,6 +36,9 @@ reqwest = ["native-io", "dep:reqwest", "dep:tokio"]
 # entry points. Select `reqwest` alone when a host supplies its own client and
 # does not need ureq.
 async = ["http", "reqwest"]
+# Pkl's external reader protocol: read `scheme:` modules and resources
+# from a reader process, and the message codec for writing such a process.
+external-readers = ["native-io", "dep:rmpv"]
 
 [dependencies]
 fancy-regex = { version = "0.20", optional = true }
@@ -43,6 +46,7 @@ indexmap    = { version = "2", optional = true }
 libm        = "0.2.16"
 md-5       = { version = "0.11", optional = true }
 miette     = { version = "7", features = ["derive"], optional = true }
+rmpv       = { version = "1", optional = true }
 rustc-hash = { version = "2", optional = true }
 serde_json = { version = "1", optional = true }
 sha1       = { version = "0.11", optional = true }
@@ -105,3 +109,12 @@ debug = 1
 [[test]]
 name = "shared_members"
 required-features = ["native-io"]
+
+[[test]]
+name = "readers"
+required-features = ["native-io"]
+
+[[test]]
+name = "external_reader"
+harness = false
+required-features = ["external-readers"]

@@ -7,22 +7,40 @@ use super::*;
 impl Evaluator {
     pub(super) fn read_to_string_io(&mut self, path: &Path) -> Result<String> {
         self.check_cancelled()?;
+        if let Some(source) = self.reader_module_source(path) {
+            return source?.ok_or_else(|| reader_module_missing(path));
+        }
         self.capabilities.read_to_string(path)
     }
 
     pub(super) fn path_exists_io(&mut self, path: &Path) -> Result<bool> {
+        if let Some(source) = self.reader_module_source(path) {
+            return Ok(source?.is_some());
+        }
         self.capabilities.path_exists(path)
     }
 
     pub(super) fn is_file_io(&mut self, path: &Path) -> Result<bool> {
+        if let Some(source) = self.reader_module_source(path) {
+            return Ok(source?.is_some());
+        }
         self.capabilities.is_file(path)
     }
 
     pub(super) fn canonicalize_io(&mut self, path: &Path) -> Result<PathBuf> {
+        // A module reader's virtual path is its own canonical spelling.
+        if self.reader_module_uri(path).is_some() {
+            return Ok(absolute_clean(path));
+        }
         self.capabilities.canonicalize(path)
     }
 
     pub(super) fn read_bytes_io(&mut self, path: &Path) -> Result<Vec<u8>> {
+        if let Some(source) = self.reader_module_source(path) {
+            return source?
+                .map(String::into_bytes)
+                .ok_or_else(|| reader_module_missing(path));
+        }
         self.capabilities.read_bytes(path)
     }
 
@@ -83,6 +101,14 @@ impl Evaluator {
     }
 }
 
+/// The error reading a reader's virtual path that names no module fails with.
+fn reader_module_missing(path: &Path) -> Error {
+    Error::Io(
+        path.to_path_buf(),
+        std::io::Error::from(std::io::ErrorKind::NotFound),
+    )
+}
+
 impl Evaluator {
     /// Construct an evaluator with the native host capabilities.
     #[cfg(feature = "native-io")]
@@ -130,6 +156,10 @@ impl Evaluator {
             allowed_modules: None,
             package_bases: HashMap::default(),
             module_path_admitted: HashMap::default(),
+            module_readers: HashMap::default(),
+            resource_readers: HashMap::default(),
+            reader_sources: HashMap::default(),
+            setup_error: None,
             environment: None,
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
@@ -225,6 +255,62 @@ impl Evaluator {
     /// Set the directories `modulepath:` module URIs are searched in, in order.
     pub fn set_module_path(&mut self, dirs: Vec<PathBuf>) {
         self.module_path = dirs;
+    }
+
+    /// Read modules under `scheme` (for example `myapp` for
+    /// `import "myapp:/Lib.pkl"`) from `reader`, replacing any reader
+    /// registered for it. Module URIs must be hierarchical
+    /// (`myapp:/path/Module.pkl`). Fails for a malformed scheme or one pklr
+    /// implements itself.
+    pub fn set_module_reader(
+        &mut self,
+        scheme: &str,
+        reader: impl crate::reader::ModuleReader + 'static,
+    ) -> Result<()> {
+        self.set_module_reader_arc(scheme, Arc::new(reader))
+    }
+
+    pub(crate) fn set_module_reader_arc(
+        &mut self,
+        scheme: &str,
+        reader: Arc<dyn crate::reader::ModuleReader>,
+    ) -> Result<()> {
+        crate::reader::validate_scheme(scheme)?;
+        let root = reader_root(scheme);
+        self.reader_sources
+            .retain(|path, _| !path.starts_with(&root));
+        self.module_readers.insert(scheme.to_string(), reader);
+        Ok(())
+    }
+
+    /// Record a configuration error that every evaluation fails with. The
+    /// first one recorded is kept.
+    #[cfg(feature = "native-io")]
+    pub(crate) fn set_setup_error(&mut self, error: Error) {
+        self.setup_error.get_or_insert_with(|| error.to_string());
+    }
+
+    /// Read resources under `scheme` (for example `myapp` for
+    /// `read("myapp:/data.txt")`) from `reader`, replacing any reader
+    /// registered for it. The scheme must also be allowed as a resource (see
+    /// [`Self::set_allowed_resources`]); [`crate::EvaluatorBuilder`] allows it
+    /// unless the host sets the allowed resources itself, as Pkl does.
+    pub fn set_resource_reader(
+        &mut self,
+        scheme: &str,
+        reader: impl crate::reader::ResourceReader + 'static,
+    ) -> Result<()> {
+        self.set_resource_reader_arc(scheme, Arc::new(reader))
+    }
+
+    pub(crate) fn set_resource_reader_arc(
+        &mut self,
+        scheme: &str,
+        reader: Arc<dyn crate::reader::ResourceReader>,
+    ) -> Result<()> {
+        crate::reader::validate_scheme(scheme)?;
+        self.resource_readers.insert(scheme.to_string(), reader);
+        Ok(())
     }
 
     pub fn set_allowed_resources(&mut self, resources: Vec<String>) {

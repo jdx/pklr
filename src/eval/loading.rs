@@ -8,10 +8,20 @@ impl Evaluator {
     pub(super) fn local_file_path(&mut self, current_path: &Path, uri: &str) -> Result<PathBuf> {
         if uri.starts_with("file:") {
             file_uri_path(uri)
-        } else if uri.starts_with("modulepath:") {
+        } else if self.is_path_scheme(uri) {
             self.module_path_file(uri, false)
         } else {
             self.resolve_local_path(current_path, uri)
+        }
+    }
+
+    /// Whether modules under the scheme of `uri` are found by path: the
+    /// `modulepath:` scheme, or a scheme with a module reader.
+    pub(super) fn is_path_scheme(&self, uri: &str) -> bool {
+        match super::resource::uri_scheme(uri) {
+            Some("modulepath") => true,
+            Some(scheme) => self.module_readers.contains_key(scheme),
+            None => false,
         }
     }
 
@@ -19,8 +29,19 @@ impl Evaluator {
     /// directory holding a regular file at that path. A URI that names nothing
     /// is [`Error::ImportNotFound`]. This is the single place module path
     /// lookups happen.
+    ///
+    /// A URI under a scheme with a module reader names the virtual path that
+    /// stands for it (see [`reader_root`]), which the reader serves.
     fn module_path_file(&mut self, uri: &str, resource: bool) -> Result<PathBuf> {
         let segments = module_path_segments(uri)?;
+        if let Some(scheme) = super::resource::uri_scheme(uri).filter(|s| *s != "modulepath") {
+            let mut candidate = reader_root(scheme);
+            candidate.extend(&segments);
+            if self.is_file_io(&candidate)? {
+                return Ok(candidate);
+            }
+            return Err(Error::ImportNotFound(uri.to_string()));
+        }
         for dir in self.module_path.clone() {
             let mut candidate = dir;
             candidate.extend(&segments);
@@ -64,7 +85,19 @@ pub(super) fn normalize_module_path_uri(uri: &str) -> Result<Option<String>> {
         Err(Error::ImportNotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let mut out = String::from("modulepath:");
+    let scheme = super::resource::uri_scheme(path).unwrap_or("modulepath");
+    let mut out = path_scheme_uri(scheme, segments.iter().map(String::as_str));
+    out.push_str(query);
+    Ok(Some(out))
+}
+
+/// The hierarchical URI `scheme:/a/b` for the path segments `a`, `b`,
+/// percent-encoded as Pkl spells it.
+pub(super) fn path_scheme_uri<'a>(
+    scheme: &str,
+    segments: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let mut out = format!("{scheme}:");
     for segment in segments {
         out.push('/');
         for byte in segment.bytes() {
@@ -75,8 +108,22 @@ pub(super) fn normalize_module_path_uri(uri: &str) -> Result<Option<String>> {
             }
         }
     }
-    out.push_str(query);
-    Ok(Some(out))
+    out
+}
+
+/// The root of the virtual paths that stand for the modules a module reader
+/// serves under `scheme`: `scheme:/a/b.pkl` is `<root>/a/b.pkl`. Nothing is
+/// written there; the evaluator's IO serves these paths from the reader, so
+/// relative imports between such modules resolve like local files do.
+pub(super) fn reader_root(scheme: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(format!(r"\\?\pklr-reader\{scheme}"))
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/.pklr-reader").join(scheme)
+    }
 }
 
 /// Split a URI into its path and its `?query`/`#fragment` suffix.
@@ -84,13 +131,23 @@ fn split_query(uri: &str) -> (&str, &str) {
     uri.split_at(uri.find(['?', '#']).unwrap_or(uri.len()))
 }
 
-/// The normalized path segments of a `modulepath:/path` URI.
-fn module_path_segments(uri: &str) -> Result<Vec<String>> {
+/// The normalized path segments of a `modulepath:/path` URI, or of a URI
+/// under a module reader's scheme.
+pub(super) fn module_path_segments(uri: &str) -> Result<Vec<String>> {
+    let scheme = super::resource::uri_scheme(uri).unwrap_or("modulepath");
     // The file is named by the path alone, not a query or fragment.
-    let Some(rest) = split_query(uri).0.strip_prefix("modulepath:/") else {
-        return Err(Error::Eval(format!(
-            "Module URI `{uri}` is missing a `/` after `modulepath:`."
-        )));
+    let Some(rest) = split_query(uri)
+        .0
+        .strip_prefix(scheme)
+        .and_then(|rest| rest.strip_prefix(":/"))
+    else {
+        return Err(Error::Eval(if scheme == "modulepath" {
+            format!("Module URI `{uri}` is missing a `/` after `modulepath:`.")
+        } else {
+            format!(
+                "Module URI `{uri}` is missing a `/` after `{scheme}:`. pklr reads modules from a module reader by hierarchical URIs, such as `{scheme}:/Module.pkl`."
+            )
+        }));
     };
     let not_found = || Error::ImportNotFound(uri.to_string());
     // Decode the URI path and remove dot segments. A segment that could be
@@ -280,7 +337,7 @@ impl Evaluator {
         self.check_module_path_uri(uri)?;
         let import_path = match self.local_file_path(path, uri) {
             Ok(import_path) => import_path,
-            Err(Error::ImportNotFound(_)) if uri.starts_with("modulepath:") => return Ok(None),
+            Err(Error::ImportNotFound(_)) if self.is_path_scheme(uri) => return Ok(None),
             Err(error) => return Err(error),
         };
         self.check_import_allowed(uri, &import_path)?;
@@ -379,7 +436,7 @@ impl Evaluator {
     /// import by its URI, any other import by the file it names, so one
     /// import's admission never covers another import of the same file.
     pub(super) fn check_import_allowed(&mut self, uri: &str, path: &Path) -> Result<()> {
-        if uri.starts_with("modulepath:") {
+        if self.is_path_scheme(uri) {
             self.admit_module_path(uri, path)
         } else {
             self.check_file_path_allowed(path)
@@ -390,7 +447,7 @@ impl Evaluator {
     /// policy rather than the file it names, before looking for that file.
     /// A no-op for any other URI.
     pub(super) fn check_module_path_uri(&self, uri: &str) -> Result<()> {
-        if uri.starts_with("modulepath:") {
+        if self.is_path_scheme(uri) {
             self.check_module_allowed(uri)?;
         }
         Ok(())
@@ -400,7 +457,7 @@ impl Evaluator {
     /// resolved to the file `path`, so loading the file is not refused as a
     /// `file:` URI. Call it only for a module that is actually loaded.
     pub(super) fn admit_module_path(&mut self, uri: &str, path: &Path) -> Result<()> {
-        if !uri.starts_with("modulepath:") {
+        if !self.is_path_scheme(uri) {
             return Ok(());
         }
         self.check_module_allowed(uri)?;
@@ -424,12 +481,104 @@ impl Evaluator {
         if let Some(remote) = resolve_remote_relative(current_path, uri) {
             return Some(remote);
         }
-        if self.module_path_admitted.is_empty() || has_scheme(uri) {
+        if (self.module_path_admitted.is_empty() && self.module_readers.is_empty())
+            || has_scheme(uri)
+        {
             return None;
         }
         let absolute = absolute_clean(&self.host_absolute_path(current_path.to_path_buf()));
-        let base = self.module_path_admitted.get(&absolute)?.clone();
+        let base = match self.module_path_admitted.get(&absolute) {
+            Some(base) => base.clone(),
+            None => self.reader_module_uri(&absolute)?,
+        };
         self.join_module_path_uri(&base, uri)
+    }
+
+    /// The module reader URI the virtual path `path` stands for (see
+    /// [`reader_root`]), or `None` for any other path or one that climbs out
+    /// of its reader's root.
+    pub(super) fn reader_module_uri(&self, path: &Path) -> Option<String> {
+        if self.module_readers.is_empty() {
+            return None;
+        }
+        let path = absolute_clean(path);
+        self.module_readers.keys().find_map(|scheme| {
+            let rest = path.strip_prefix(reader_root(scheme)).ok()?;
+            let segments = rest
+                .components()
+                .map(|component| match component {
+                    std::path::Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            (!segments.is_empty()).then(|| path_scheme_uri(scheme, segments))
+        })
+    }
+
+    /// The URI the relative resource reference `rel` names from the module at
+    /// the virtual path `module`, or `None` when `module` is not a reader
+    /// module. A triple-dot reference is searched for among the resources the
+    /// scheme's resource reader serves.
+    pub(super) fn reader_relative_uri(&mut self, module: &Path, rel: &str) -> Option<String> {
+        let base = self.reader_module_uri(module)?;
+        self.join_path_scheme_uri(&base, rel, true)
+    }
+
+    /// Whether the resource reader for the scheme of `uri` serves a resource
+    /// there that the resource policy allows. A refused or failed read counts
+    /// as absent, like any other triple-dot candidate. A resource found is
+    /// cached, so the read that follows the search does not ask again.
+    fn reader_resource_exists(&mut self, uri: &str) -> bool {
+        let Some(scheme) = super::resource::uri_scheme(uri) else {
+            return false;
+        };
+        let Some(reader) = self.resource_readers.get(scheme).map(Arc::clone) else {
+            return false;
+        };
+        if self.check_resource_allowed(uri).is_err() {
+            return false;
+        }
+        if self.resource_cache.contains_key(uri) {
+            return true;
+        }
+        if self.check_cancelled().is_err() {
+            return false;
+        }
+        match reader.read_resource(uri) {
+            Ok(Some(bytes)) => {
+                let value = super::resource::resource_value(uri, &bytes);
+                self.resource_cache.insert(uri.to_string(), value);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The source a module reader serves for the virtual path `path`, read
+    /// once per evaluator: `Some(Ok(None))` when the reader has no module
+    /// there, and `None` when `path` is not a reader's virtual path.
+    pub(super) fn reader_module_source(&mut self, path: &Path) -> Option<Result<Option<String>>> {
+        let uri = self.reader_module_uri(path)?;
+        // Whatever URI reached this path (a `file:` URI can spell it too),
+        // the reader serves `uri`, so that is what the policy decides on.
+        if let Err(error) = self.check_module_allowed(&uri) {
+            return Some(Err(error));
+        }
+        let key = absolute_clean(path);
+        if let Some(source) = self.reader_sources.get(&key) {
+            return Some(Ok(source.clone()));
+        }
+        let scheme = super::resource::uri_scheme(&uri)?;
+        let reader = Arc::clone(self.module_readers.get(scheme)?);
+        if let Err(error) = self.check_cancelled() {
+            return Some(Err(error));
+        }
+        let source = match reader.read_module(&uri) {
+            Ok(source) => source,
+            Err(error) => return Some(Err(error)),
+        };
+        self.reader_sources.insert(key, source.clone());
+        Some(Ok(source))
     }
 
     /// The `modulepath:` URI the relative reference `rel` names from the module
@@ -438,10 +587,20 @@ impl Evaluator {
     /// (`modulepath:/../x.pkl`) names nothing and is not mistaken for a file
     /// inside the root. A triple-dot reference names the nearest ancestor
     /// directory that holds the file, or the root when none does.
-    fn join_module_path_uri(&mut self, base: &str, rel: &str) -> Option<String> {
+    pub(super) fn join_module_path_uri(&mut self, base: &str, rel: &str) -> Option<String> {
+        self.join_path_scheme_uri(base, rel, false)
+    }
+
+    /// [`Self::join_module_path_uri`] for a module (`resource` false) or a
+    /// resource (`resource` true) reference: a triple-dot resource reference
+    /// made under a reader's scheme is looked for through that scheme's
+    /// resource reader, skipping candidates the resource policy refuses.
+    fn join_path_scheme_uri(&mut self, base: &str, rel: &str, resource: bool) -> Option<String> {
         let (rel_path, suffix) = split_query(rel);
+        let scheme = super::resource::uri_scheme(base)?.to_string();
+        let base_prefix = format!("{scheme}:/");
         let mut dir: Vec<&str> = base
-            .strip_prefix("modulepath:/")
+            .strip_prefix(base_prefix.as_str())
             .unwrap_or_default()
             .split('/')
             .collect();
@@ -455,23 +614,34 @@ impl Evaluator {
             // `..` that climbs, so such a path is refused here as an escape
             // rather than normalized into the module path.
             if triple_dot.split('/').any(|part| part == "..") {
-                return Some(format!("modulepath:/../{triple_dot}{suffix}"));
+                return Some(format!("{scheme}:/../{triple_dot}{suffix}"));
             }
-            let module = Path::new("/").join(base.strip_prefix("modulepath:/").unwrap_or_default());
+            let module =
+                Path::new("/").join(base.strip_prefix(base_prefix.as_str()).unwrap_or_default());
             let found =
                 resolve_triple_dot(&module, triple_dot, Some(Path::new("/")), |candidate| {
                     let uri = format!(
-                        "modulepath:{}",
+                        "{scheme}:{}",
                         candidate.to_string_lossy().replace('\\', "/")
                     );
-                    Ok(self.module_path_file(&uri, false).is_ok())
+                    if resource && scheme != "modulepath" {
+                        // Probe the URI the read would ask for: normalized,
+                        // with its query or fragment.
+                        let full = format!("{uri}{suffix}");
+                        let full = normalize_module_path_uri(&full)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(full);
+                        return Ok(self.reader_resource_exists(&full));
+                    }
+                    Ok(self.module_path_file(&uri, resource).is_ok())
                 });
             // Nothing found names the root, as Pkl reports it.
             let name = match found {
                 Ok(Some(path)) => path.to_string_lossy().replace('\\', "/"),
                 _ => format!("/{triple_dot}"),
             };
-            let joined = format!("modulepath:{name}{suffix}");
+            let joined = format!("{scheme}:{name}{suffix}");
             return Some(
                 normalize_module_path_uri(&joined)
                     .ok()
@@ -493,7 +663,7 @@ impl Evaluator {
                 part => stack.push(part),
             }
         }
-        let joined = format!("modulepath:/{}{suffix}", stack.join("/"));
+        let joined = format!("{scheme}:/{}{suffix}", stack.join("/"));
         Some(
             normalize_module_path_uri(&joined)
                 .ok()
@@ -545,6 +715,9 @@ impl Evaluator {
     }
 
     pub(super) fn eval_source_inner(&mut self, source: &str, path: &Path) -> Result<Value> {
+        if let Some(error) = &self.setup_error {
+            return Err(Error::Eval(error.clone()));
+        }
         // Seed import cache for the entry file so circular back-references work.
         // Mark it in flight too, so a narrowed import that reads this
         // placeholder is not cached.
@@ -576,6 +749,9 @@ impl Evaluator {
     pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
         self.on_grown_stack(|this| {
             this.begin_evaluation();
+            if let Some(error) = &this.setup_error {
+                return Err(Error::Eval(error.clone()));
+            }
             this.check_module_path_allowed(path)?;
             let source = this.read_to_string_io(path)?;
             this.eval_source_inner(&source, path)
@@ -739,7 +915,7 @@ impl Evaluator {
         let mut current = (module.amends.clone(), path.to_path_buf());
         for _ in 0..self.max_depth {
             let (Some(uri), from) = current else { break };
-            let local = uri.starts_with("file:") || uri.starts_with("modulepath:");
+            let local = uri.starts_with("file:") || self.is_path_scheme(&uri);
             if uri.contains("://") && !local {
                 break;
             }
@@ -771,7 +947,7 @@ impl Evaluator {
             }
             // A remote base is not followed here; assume it may reach the
             // standard library rather than reject members it might declare.
-            let local = uri.starts_with("file:") || uri.starts_with("modulepath:");
+            let local = uri.starts_with("file:") || self.is_path_scheme(&uri);
             if uri.contains("://") && !local {
                 return true;
             }
@@ -848,9 +1024,10 @@ impl Evaluator {
                 )));
             }
         }
-        if uri.starts_with("modulepath:") {
+        if self.is_path_scheme(uri) {
+            let scheme = super::resource::uri_scheme(uri).unwrap_or_default();
             return Err(Error::Eval(format!(
-                "Cannot expand glob pattern `{uri}` because scheme `modulepath` is not globbable."
+                "Cannot expand glob pattern `{uri}` because scheme `{scheme}` is not globbable."
             )));
         }
         // Non-local glob imports resolve to an empty mapping.

@@ -3,8 +3,12 @@ pub mod capabilities;
 pub mod error;
 #[cfg(feature = "eval-core")]
 pub mod eval;
+#[cfg(feature = "external-readers")]
+pub mod external_reader;
 pub mod lexer;
 pub mod parser;
+#[cfg(feature = "eval-core")]
+pub mod reader;
 mod stack;
 #[cfg(feature = "eval-core")]
 pub mod value;
@@ -16,6 +20,8 @@ pub use capabilities::{EvalCapabilities, FetchBudget};
 pub use error::{Error, Result};
 #[cfg(feature = "eval-core")]
 pub use eval::{Evaluator, GlobAccess, NativeGlobAccess, expand_glob, expand_glob_with};
+#[cfg(feature = "eval-core")]
+pub use reader::{ModuleReader, ResourceReader};
 #[cfg(feature = "eval-core")]
 pub use value::Value;
 
@@ -92,6 +98,8 @@ pub struct EvaluatorBuilder {
     environment: Option<std::collections::BTreeMap<String, String>>,
     external_properties: std::collections::BTreeMap<String, String>,
     preloaded_packages: Vec<PreloadedPackage>,
+    module_readers: Vec<(String, std::sync::Arc<dyn ModuleReader>)>,
+    resource_readers: Vec<(String, std::sync::Arc<dyn ResourceReader>)>,
 }
 
 /// Package content a host supplies up front instead of fetching it.
@@ -204,6 +212,93 @@ impl EvaluatorBuilder {
         self
     }
 
+    /// Read modules under `scheme` (as in `import "myapp:/Lib.pkl"`) from
+    /// `reader`. Module URIs must be hierarchical (`myapp:/path/Module.pkl`).
+    /// See [`reader`] and, for a reader process that speaks Pkl's external
+    /// reader protocol, `external_module_reader`.
+    pub fn module_reader(
+        mut self,
+        scheme: impl Into<String>,
+        reader: impl ModuleReader + 'static,
+    ) -> Self {
+        self.module_readers
+            .push((scheme.into(), std::sync::Arc::new(reader)));
+        self
+    }
+
+    /// Read resources under `scheme` (as in `read("myapp:/data.txt")`) from
+    /// `reader`. Unless [`allowed_resources`](Self::allowed_resources) is
+    /// set, the scheme is allowed as a resource, as Pkl allows the schemes of
+    /// external resource readers.
+    pub fn resource_reader(
+        mut self,
+        scheme: impl Into<String>,
+        reader: impl ResourceReader + 'static,
+    ) -> Self {
+        self.resource_readers
+            .push((scheme.into(), std::sync::Arc::new(reader)));
+        self
+    }
+
+    /// Read modules under `scheme` from an external reader process, like
+    /// `pkl eval --external-module-reader scheme='executable arguments...'`.
+    /// The process starts on the first read and is shared by every scheme
+    /// registered with the same executable and arguments on this builder.
+    #[cfg(feature = "external-readers")]
+    pub fn external_module_reader(
+        self,
+        scheme: impl Into<String>,
+        executable: impl Into<std::path::PathBuf>,
+        arguments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let scheme = scheme.into();
+        let process = self.external_process(executable.into(), arguments);
+        let reader = external_reader::ExternalModuleReader::new(process, &scheme);
+        self.module_reader(scheme, reader)
+    }
+
+    /// Read resources under `scheme` from an external reader process, like
+    /// `pkl eval --external-resource-reader scheme='executable arguments...'`.
+    #[cfg(feature = "external-readers")]
+    pub fn external_resource_reader(
+        self,
+        scheme: impl Into<String>,
+        executable: impl Into<std::path::PathBuf>,
+        arguments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let scheme = scheme.into();
+        let process = self.external_process(executable.into(), arguments);
+        let reader = external_reader::ExternalResourceReader::new(process, &scheme);
+        self.resource_reader(scheme, reader)
+    }
+
+    /// The reader process for `executable` and `arguments`, shared with the
+    /// readers already registered for the same command.
+    #[cfg(feature = "external-readers")]
+    fn external_process(
+        &self,
+        executable: std::path::PathBuf,
+        arguments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> std::sync::Arc<external_reader::ExternalReaderProcess> {
+        let arguments: Vec<String> = arguments.into_iter().map(Into::into).collect();
+        let existing = self
+            .module_readers
+            .iter()
+            .map(|(_, reader)| reader.external_process())
+            .chain(
+                self.resource_readers
+                    .iter()
+                    .map(|(_, reader)| reader.external_process()),
+            )
+            .flatten()
+            .find(|process| process.command() == (&executable, arguments.as_slice()));
+        existing.unwrap_or_else(|| {
+            std::sync::Arc::new(external_reader::ExternalReaderProcess::new(
+                executable, arguments,
+            ))
+        })
+    }
+
     /// Seed the package cache with content the host already has, instead of
     /// fetching it. Requires [`package_cache_dir`](Self::package_cache_dir).
     pub fn preload_package(
@@ -257,6 +352,15 @@ impl EvaluatorBuilder {
         evaluator.set_module_path(self.module_path);
         if let Some(resources) = self.allowed_resources {
             evaluator.set_allowed_resources(resources);
+        } else if !self.resource_readers.is_empty() {
+            let mut resources: Vec<String> = eval::DEFAULT_ALLOWED_RESOURCES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            for (scheme, _) in &self.resource_readers {
+                resources.push(format!("{scheme}:"));
+            }
+            evaluator.set_allowed_resources(resources);
         }
         if let Some(modules) = self.allowed_modules {
             evaluator.set_allowed_modules(modules);
@@ -267,6 +371,16 @@ impl EvaluatorBuilder {
         evaluator.set_external_properties(self.external_properties);
         for package in &self.preloaded_packages {
             let _ = evaluator.preload_package(&package.url, &package.extension, &package.bytes);
+        }
+        for (scheme, reader) in self.module_readers {
+            if let Err(error) = evaluator.set_module_reader_arc(&scheme, reader) {
+                evaluator.set_setup_error(error);
+            }
+        }
+        for (scheme, reader) in self.resource_readers {
+            if let Err(error) = evaluator.set_resource_reader_arc(&scheme, reader) {
+                evaluator.set_setup_error(error);
+            }
         }
         evaluator
     }

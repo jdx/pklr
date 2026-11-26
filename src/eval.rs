@@ -71,8 +71,9 @@ pub(crate) use package::write_atomic;
 use package::*;
 use remote::*;
 pub(crate) use remote::{parse_triple_dot_path, resolve_triple_dot};
+pub(crate) use resource::DEFAULT_ALLOWED_RESOURCES;
 pub(crate) use resource::file_uri_path;
-use resource::{DEFAULT_ALLOWED_RESOURCES, absolute_clean, file_uri};
+use resource::{absolute_clean, file_uri};
 pub(crate) use scope::Scope as ListScope;
 pub(crate) use scope::SourceScope;
 use scope::*;
@@ -191,6 +192,18 @@ pub struct Evaluator {
     /// stays a `modulepath:` URI, and under a module policy the file is not
     /// checked again as a `file:` URI when it is loaded.
     module_path_admitted: HashMap<PathBuf, String>,
+    /// Module readers by the URI scheme they serve.
+    module_readers: HashMap<String, Arc<dyn crate::reader::ModuleReader>>,
+    /// Resource readers by the URI scheme they serve.
+    resource_readers: HashMap<String, Arc<dyn crate::reader::ResourceReader>>,
+    /// Module sources read from module readers, by the virtual path that
+    /// stands for each module URI (see `reader_module_path`). `None` records
+    /// that the reader has no module there.
+    reader_sources: HashMap<PathBuf, Option<String>>,
+    /// A configuration error from [`crate::EvaluatorBuilder::build`], such as
+    /// a reader registered for an invalid scheme, which every evaluation
+    /// then fails with.
+    setup_error: Option<String>,
     environment: Option<BTreeMap<String, String>>,
     external_properties: BTreeMap<String, String>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.

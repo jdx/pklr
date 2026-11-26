@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const DEFAULT_ALLOWED_RESOURCES: &[&str] = &[
+pub(crate) const DEFAULT_ALLOWED_RESOURCES: &[&str] = &[
     "prop:",
     "env:",
     "file:",
@@ -54,6 +54,14 @@ impl Evaluator {
                 }
                 Err(error) => Err(error),
             },
+            Target::Reader(uri) => {
+                let scheme = uri_scheme(&uri).unwrap_or_default();
+                let reader = Arc::clone(&self.resource_readers[scheme]);
+                self.check_cancelled()?;
+                Ok(reader
+                    .read_resource(&uri)?
+                    .map(|bytes| resource_value(&uri, &bytes)))
+            }
             Target::Unreadable => Ok(None),
         };
         if let Some(value) = value? {
@@ -107,7 +115,9 @@ impl Evaluator {
         }
         let absolute = match uri_scheme(uri) {
             Some(_) => uri.to_string(),
-            None => match resolve_remote_relative(module, uri) {
+            None => match resolve_remote_relative(module, uri)
+                .or_else(|| self.reader_relative_uri(module, uri))
+            {
                 Some(remote) => remote,
                 None => {
                     // When no file URI can possibly be allowed, fail before
@@ -151,11 +161,12 @@ impl Evaluator {
                 Some((path, uri)) => Target::File { path, uri },
                 None => Target::Unreadable,
             },
+            scheme if self.resource_readers.contains_key(scheme) => Target::Reader(absolute),
             _ => Target::Unreadable,
         })
     }
 
-    fn check_resource_allowed(&self, uri: &str) -> Result<()> {
+    pub(super) fn check_resource_allowed(&self, uri: &str) -> Result<()> {
         // Schemes are case-sensitive in Pkl.  A prefix is compared after a
         // file URI has been normalized; this prevents `../` allowlist escapes.
         if self.allowed_resources.iter().any(|prefix| {
@@ -238,7 +249,10 @@ impl Evaluator {
         // never paths in the evaluator process' filesystem namespace.
         let resolved_remote = uri_scheme(pattern)
             .is_none()
-            .then(|| resolve_remote_relative(module, pattern))
+            .then(|| {
+                resolve_remote_relative(module, pattern)
+                    .or_else(|| self.reader_relative_uri(module, pattern))
+            })
             .flatten();
         let pattern = resolved_remote.as_deref().unwrap_or(pattern);
         let mut out = ObjectMap::default();
@@ -323,8 +337,13 @@ impl Evaluator {
 enum Target {
     Env(String),
     Prop(String),
-    File { path: PathBuf, uri: String },
+    File {
+        path: PathBuf,
+        uri: String,
+    },
     Remote(String),
+    /// A URI under a scheme with a resource reader.
+    Reader(String),
     Unreadable,
 }
 
@@ -333,7 +352,7 @@ impl Target {
         match self {
             Self::Env(name) => format!("env:{name}"),
             Self::Prop(name) => format!("prop:{name}"),
-            Self::File { uri, .. } | Self::Remote(uri) => uri.clone(),
+            Self::File { uri, .. } | Self::Remote(uri) | Self::Reader(uri) => uri.clone(),
             Self::Unreadable => "unreadable:".to_string(),
         }
     }
@@ -538,7 +557,7 @@ fn file_allowlist_matches(uri: &str, prefix: &str) -> bool {
             .strip_prefix(&prefix)
             .is_some_and(|remaining| remaining.starts_with('/'))
 }
-fn resource_value(uri: &str, bytes: &[u8]) -> Value {
+pub(super) fn resource_value(uri: &str, bytes: &[u8]) -> Value {
     let mut map = ObjectMap::default();
     map.insert("uri".into(), Value::String(uri.into()));
     map.insert(

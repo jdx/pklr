@@ -11,6 +11,7 @@ No external binary or CLI required.
 - Glob imports, as `import* "dir/*.pkl" as Mods` declarations and `import*("dir/*.pkl")` expressions
 - Persistent caching, cache preloading, and offline evaluation for `package://` imports
 - Concurrent prefetching of remote `http(s)://` and `package://` imports
+- Module and resource readers for custom URI schemes, including Pkl's external reader processes
 - String interpolation, lambdas, higher-order methods
 - Rich error diagnostics via [miette](https://crates.io/crates/miette)
 
@@ -47,6 +48,7 @@ results and errors are the same as fetching one module at a time.
 | `package-zip` | yes | `package://` zip archives. |
 | `miette-diagnostics` | yes | Rich error diagnostics. |
 | `async` | no | Backwards-compatible additive feature: ureq, reqwest, and async evaluation entry points. |
+| `external-readers` | no | Pkl's external reader protocol: `EvaluatorBuilder::external_module_reader`, `external_resource_reader`, and the `external_reader` message codec. |
 
 An embedder with its own IO can depend on the evaluator alone:
 
@@ -142,6 +144,35 @@ fn load_bundled_config() -> pklr::Result<serde_json::Value> {
 Cached content already on disk wins, so preloading never overrides a package
 fetched from the network, and a config pinning a different version still
 resolves that version normally.
+
+## Custom URI schemes
+
+A host can serve modules and resources under a scheme of its own, as Pkl's
+[external readers](https://pkl-lang.org/main/current/language-reference/index.html#external-readers)
+do. Module URIs must be hierarchical (`myapp:/Config.pkl`), so a module can
+import its neighbours with relative URIs:
+
+```rust
+fn load_config() -> pklr::Result<serde_json::Value> {
+    pklr::EvaluatorBuilder::new()
+        .module_reader("myapp", |uri: &str| -> pklr::Result<Option<String>> {
+            Ok(match uri {
+                "myapp:/Config.pkl" => Some(include_str!("Config.pkl").to_string()),
+                _ => None,
+            })
+        })
+        // A config can now `amends "myapp:/Config.pkl"`.
+        .eval_to_json(std::path::Path::new("config.pkl"))
+}
+```
+
+`resource_reader` does the same for `read("myapp:/...")`, and allows the
+scheme as a resource unless `allowed_resources` is set. With the
+`external-readers` feature, `external_module_reader` and
+`external_resource_reader` run a reader process like
+`pkl eval --external-module-reader myapp='myapp-reader'`, and
+`pklr::external_reader` has the message codec for writing such a reader, one
+that `pkl` can run too.
 
 ## License
 
