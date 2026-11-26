@@ -2421,6 +2421,32 @@ fn amending_a_module_does_not_repeat_a_spread() {
     assert_eq!(json, expected("2"));
 }
 
+// The layers of a member keep reading the `local`s of the module that wrote
+// them, also where a later module declares a local of the same name.
+#[test]
+fn listing_layers_keep_the_locals_of_their_own_module() {
+    let json = eval_module_chain(
+        "pklr_listing_layers_keep_locals",
+        &[
+            ("base.pkl", "v = \"1\"\nl: Listing<String>\nn: Dynamic\n"),
+            (
+                "mid.pkl",
+                "amends \"base.pkl\"\nlocal x = \"lx\"\nlocal xs = List(\"s1\")\n\
+                 l { x; ...xs }\nn { items { x } }\n",
+            ),
+            (
+                "mid2.pkl",
+                "amends \"mid.pkl\"\nlocal x = \"other\"\nl { v; x }\nn { items { v } }\n",
+            ),
+            ("main.pkl", "amends \"mid2.pkl\"\nv = \"2\"\n"),
+        ],
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"v": "2", "l": ["lx", "s1", "2", "other"], "n": {"items": ["lx", "2"]}})
+    );
+}
+
 // A member typed with a union that names no default amends its default, null,
 // into a `Dynamic` when a later module overrides what its layers read, as it
 // does when nothing is overridden.
