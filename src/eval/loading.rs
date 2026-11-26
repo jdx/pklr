@@ -133,7 +133,7 @@ fn split_query(uri: &str) -> (&str, &str) {
 
 /// The normalized path segments of a `modulepath:/path` URI, or of a URI
 /// under a module reader's scheme.
-fn module_path_segments(uri: &str) -> Result<Vec<String>> {
+pub(super) fn module_path_segments(uri: &str) -> Result<Vec<String>> {
     let scheme = super::resource::uri_scheme(uri).unwrap_or("modulepath");
     // The file is named by the path alone, not a query or fragment.
     let Some(rest) = split_query(uri)
@@ -515,11 +515,29 @@ impl Evaluator {
         })
     }
 
-    /// The URI the relative reference `rel` names from the module at the
-    /// virtual path `module`, or `None` when `module` is not a reader module.
+    /// The URI the relative resource reference `rel` names from the module at
+    /// the virtual path `module`, or `None` when `module` is not a reader
+    /// module. A triple-dot reference is searched for among the resources the
+    /// scheme's resource reader serves.
     pub(super) fn reader_relative_uri(&mut self, module: &Path, rel: &str) -> Option<String> {
         let base = self.reader_module_uri(module)?;
-        self.join_module_path_uri(&base, rel)
+        self.join_path_scheme_uri(&base, rel, true)
+    }
+
+    /// Whether the resource reader for the scheme of `uri` serves a resource
+    /// there that the resource policy allows. A refused or failed read counts
+    /// as absent, like any other triple-dot candidate.
+    fn reader_resource_exists(&mut self, uri: &str) -> bool {
+        let Some(scheme) = super::resource::uri_scheme(uri) else {
+            return false;
+        };
+        let Some(reader) = self.resource_readers.get(scheme).map(Arc::clone) else {
+            return false;
+        };
+        if self.check_resource_allowed(uri).is_err() || self.check_cancelled().is_err() {
+            return false;
+        }
+        matches!(reader.read_resource(uri), Ok(Some(_)))
     }
 
     /// The source a module reader serves for the virtual path `path`, read
@@ -556,6 +574,14 @@ impl Evaluator {
     /// inside the root. A triple-dot reference names the nearest ancestor
     /// directory that holds the file, or the root when none does.
     pub(super) fn join_module_path_uri(&mut self, base: &str, rel: &str) -> Option<String> {
+        self.join_path_scheme_uri(base, rel, false)
+    }
+
+    /// [`Self::join_module_path_uri`] for a module (`resource` false) or a
+    /// resource (`resource` true) reference: a triple-dot resource reference
+    /// made under a reader's scheme is looked for through that scheme's
+    /// resource reader, skipping candidates the resource policy refuses.
+    fn join_path_scheme_uri(&mut self, base: &str, rel: &str, resource: bool) -> Option<String> {
         let (rel_path, suffix) = split_query(rel);
         let scheme = super::resource::uri_scheme(base)?.to_string();
         let base_prefix = format!("{scheme}:/");
@@ -584,7 +610,10 @@ impl Evaluator {
                         "{scheme}:{}",
                         candidate.to_string_lossy().replace('\\', "/")
                     );
-                    Ok(self.module_path_file(&uri, false).is_ok())
+                    if resource && scheme != "modulepath" {
+                        return Ok(self.reader_resource_exists(&uri));
+                    }
+                    Ok(self.module_path_file(&uri, resource).is_ok())
                 });
             // Nothing found names the root, as Pkl reports it.
             let name = match found {

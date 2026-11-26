@@ -166,7 +166,7 @@ impl Evaluator {
         })
     }
 
-    fn check_resource_allowed(&self, uri: &str) -> Result<()> {
+    pub(super) fn check_resource_allowed(&self, uri: &str) -> Result<()> {
         // Schemes are case-sensitive in Pkl.  A prefix is compared after a
         // file URI has been normalized; this prevents `../` allowlist escapes.
         if self.allowed_resources.iter().any(|prefix| {

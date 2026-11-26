@@ -2786,14 +2786,21 @@ impl Evaluator {
             // URI before the module path or the reader is asked for it; one
             // that is not used is never looked up.
             if self.is_path_scheme(uri) {
-                // The module is named by its path alone, not a query or fragment.
-                let path_part = uri.split(['?', '#']).next().unwrap_or_default();
-                let name = path_part.rsplit('/').next().unwrap_or_default();
-                let alias = import
-                    .alias
-                    .as_deref()
-                    .unwrap_or_else(|| name.strip_suffix(".pkl").unwrap_or(name));
-                if !referenced_imports.contains(alias) {
+                // The alias is the one the import binds once resolved: the stem
+                // of its decoded, normalized last path segment. A URI that is
+                // malformed is reported whether or not the import is used; one
+                // that names nothing is left to the lookup below.
+                let alias = match &import.alias {
+                    Some(alias) => Some(alias.clone()),
+                    None => match super::loading::module_path_segments(uri) {
+                        Ok(segments) => segments
+                            .last()
+                            .map(|name| default_import_alias(Path::new(name))),
+                        Err(Error::ImportNotFound(_)) => None,
+                        Err(error) => return Err(error),
+                    },
+                };
+                if alias.is_some_and(|alias| !referenced_imports.contains(alias.as_str())) {
                     continue;
                 }
                 self.check_module_path_uri(uri)?;

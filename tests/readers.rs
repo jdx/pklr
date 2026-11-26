@@ -282,3 +282,90 @@ fn relative_reads_in_reader_modules_never_touch_files() {
         Err(err) => assert!(err.contains("test:/dir/data.txt"), "{err}"),
     }
 }
+
+#[test]
+fn an_encoded_reader_import_binds_its_decoded_name() {
+    let dir = TestTempDir::new("pklr_reader_encoded_import");
+    let main = dir.write(
+        "main.pkl",
+        "import \"test:/%43onfig.pkl\"\nport = Config.port\n",
+    );
+    let (reader, _) = modules(&[("test:/Config.pkl", "port = 8080\n")]);
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"port": 8080}));
+}
+
+#[test]
+fn an_unused_malformed_reader_import_is_still_reported() {
+    let dir = TestTempDir::new("pklr_reader_unused_opaque");
+    let main = dir.write("main.pkl", "import \"test:Config\"\nx = 1\n");
+    let (reader, reads) = modules(&[]);
+    let err = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .eval_to_json(&main)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("missing a `/`"), "{err}");
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+/// A resource reader serving `files`, which answers `None` for anything else.
+fn resources(
+    files: &[(&str, &str)],
+) -> impl Fn(&str) -> pklr::Result<Option<Vec<u8>>> + Send + Sync + 'static {
+    let files: HashMap<String, Vec<u8>> = files
+        .iter()
+        .map(|(uri, text)| (uri.to_string(), text.as_bytes().to_vec()))
+        .collect();
+    move |uri: &str| Ok(files.get(uri).cloned())
+}
+
+#[test]
+fn triple_dot_reads_in_reader_modules_search_the_resource_reader() {
+    let dir = TestTempDir::new("pklr_reader_triple_dot_read");
+    let main = dir.write(
+        "main.pkl",
+        "import \"test:/a/b/Reads.pkl\"\ntext = Reads.text\n",
+    );
+    // Only the resource reader has `test:/a/data.txt`; the module reader
+    // serves no such module, so a module probe would miss it.
+    let (reader, _) = modules(&[(
+        "test:/a/b/Reads.pkl",
+        "text = read(\".../data.txt\").text\n",
+    )]);
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .resource_reader(
+            "test",
+            resources(&[("test:/a/data.txt", "near"), ("test:/data.txt", "root")]),
+        )
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"text": "near"}));
+}
+
+#[test]
+fn triple_dot_reads_skip_resources_the_policy_refuses() {
+    let dir = TestTempDir::new("pklr_reader_triple_dot_policy");
+    let main = dir.write(
+        "main.pkl",
+        "import \"test:/a/b/Reads.pkl\"\ntext = Reads.text\n",
+    );
+    let (reader, _) = modules(&[(
+        "test:/a/b/Reads.pkl",
+        "text = read(\".../data.txt\").text\n",
+    )]);
+    let json = EvaluatorBuilder::new()
+        .module_reader("test", reader)
+        .resource_reader(
+            "test",
+            resources(&[("test:/a/data.txt", "near"), ("test:/data.txt", "root")]),
+        )
+        .allowed_resources(["file:".to_string(), "test:/data.txt".to_string()])
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(json, serde_json::json!({"text": "root"}));
+}
