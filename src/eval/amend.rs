@@ -2030,10 +2030,12 @@ pub(super) fn rebuild_layers(expr: &Expr, blank: &dyn Fn(&Body) -> Body) -> Expr
 ///
 /// `locals` are the `local` members of the module declaring `prop`, which its
 /// body keeps reading even where an amending module declares the same names.
+/// `scope` resolves the type aliases of the member's declared type.
 pub(super) fn compose_amended_object(
     inherited: &Arc<Property>,
     prop: &Arc<Property>,
     locals: Option<&LocalBindings>,
+    scope: &Scope,
 ) -> Arc<Property> {
     if let (None, Some(earlier), Some(body), None) =
         (&inherited.value, &inherited.body, &prop.body, &prop.value)
@@ -2045,9 +2047,14 @@ pub(super) fn compose_amended_object(
         // the other's. The first body amends the default of the type it
         // carried over from a type-only declaration, so the member keeps its
         // class and its entries their declared types.
+        // A type that names no one parent, such as `(Dynamic|Int)?`, has no
+        // class to build: the body amends its default (null) into a
+        // `Dynamic`, as it does when the member is evaluated in place.
         let base = match &inherited.type_ann {
-            Some(ty) => Expr::InferredNew(ty.clone(), earlier.clone()),
-            None => Expr::New(None, earlier.clone(), Vec::new()),
+            Some(ty) if super::types::inferred_new_type(ty, scope, 0).is_ok() => {
+                Expr::InferredNew(ty.clone(), earlier.clone())
+            }
+            _ => Expr::New(None, earlier.clone(), Vec::new()),
         };
         let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
         return Arc::new(Property {

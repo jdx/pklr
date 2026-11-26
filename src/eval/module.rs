@@ -963,7 +963,7 @@ impl Evaluator {
                 let inherited = late_inherited_properties
                     .iter()
                     .rfind(|inherited| inherited.name == prop.name && inherited.value.is_some())?;
-                let composed = compose_amended_object(inherited, prop, None);
+                let composed = compose_amended_object(inherited, prop, None, &scope);
                 composed.value.is_some().then_some(composed)
             })
             .collect();
@@ -1296,7 +1296,7 @@ impl Evaluator {
         {
             let locals = (!inherited).then_some(template_locals.as_ref()).flatten();
             let prop = match effective_late_properties.get(&prop.name) {
-                Some(base) => compose_amended_object(base, prop, locals),
+                Some(base) => compose_amended_object(base, prop, locals, &scope),
                 None => match (&prop.value, locals) {
                     (Some(value), Some(_)) => Arc::new(Property {
                         value: Some(with_template_locals(locals, prop, value.clone())),

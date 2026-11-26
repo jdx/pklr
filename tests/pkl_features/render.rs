@@ -2421,6 +2421,36 @@ fn amending_a_module_does_not_repeat_a_spread() {
     assert_eq!(json, expected("2"));
 }
 
+// A member typed with a union that names no default amends its default, null,
+// into a `Dynamic` when a later module overrides what its layers read, as it
+// does when nothing is overridden.
+#[test]
+fn listing_layers_of_a_member_typed_without_one_parent_are_kept() {
+    for (name, decl) in [
+        ("pklr_nullable_union_layers", "o: (Dynamic|Int)?\n"),
+        (
+            "pklr_nullable_union_alias_layers",
+            "typealias U = Dynamic|Int\no: U?\n",
+        ),
+    ] {
+        let base = format!("v = \"1\"\n{decl}");
+        let json = eval_module_chain(
+            name,
+            &[
+                ("base.pkl", &base),
+                ("mid.pkl", "amends \"base.pkl\"\no { items { \"x\" } }\n"),
+                ("mid2.pkl", "amends \"mid.pkl\"\no { items { v } }\n"),
+                ("main.pkl", "amends \"mid2.pkl\"\nv = \"2\"\n"),
+            ],
+        );
+        assert_eq!(
+            json,
+            serde_json::json!({"v": "2", "o": {"items": ["x", "2"]}}),
+            "{name}"
+        );
+    }
+}
+
 // Each module's amendment of a listing, directly or inside a member, keeps
 // the elements the modules before it added, also when a later module
 // overrides what one of them reads.
