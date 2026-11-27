@@ -48,13 +48,14 @@ jobs:
       # release-plz publishes to crates.io before it tags, and skips a version
       # crates.io already has. So a run that fails between the two (as v6.1.0's
       # did, on an API rate limit) would leave that version untagged for good.
-      # This tags it at the commit crates.io records, with the workflow's own
-      # token, and drafts its release so the notes are still enhanced.
+      # This tags it at the commit crates.io records and drafts its release so
+      # the notes are still enhanced. It uses release-plz's token, because the
+      # workflow's own token is refused (HTTP 403) when it creates the tag.
       - name: Tag a published version that has no tag
         id: untagged
         if: ${{ steps.release-plz.outputs.releases == '[]' }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
