@@ -27,7 +27,7 @@ jobs:
       id-token: write
       pull-requests: write
     outputs:
-      tag: ${{ steps.release-plz.outputs.releases && fromJSON(steps.release-plz.outputs.releases)[0].tag || '' }}
+      tag: ${{ steps.release-plz.outputs.releases && fromJSON(steps.release-plz.outputs.releases)[0].tag || steps.untagged.outputs.tag || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +45,63 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+      # release-plz publishes to crates.io before it tags, and skips a version
+      # crates.io already has. So a run that fails between the two (as v6.1.0's
+      # did, on an API rate limit) would leave that version untagged for good.
+      # This tags it at the commit crates.io records, with the workflow's own
+      # token, and drafts its release so the notes are still enhanced.
+      - name: Tag a published version that has no tag
+        id: untagged
+        if: ${{ steps.release-plz.outputs.releases == '[]' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pklr") | .version')
+          tag="v$version"
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            # Ask the API whether the version exists: the download URL redirects
+            # to the CDN without checking, and the CDN's answer for a missing
+            # file is not guaranteed. Only the API's 404 means unpublished; any
+            # other failure (an outage, a rate limit) fails the step.
+            agent="pklr-release (https://github.com/jdx/pklr)"
+            status=$(curl -sS --retry 3 -A "$agent" -o /dev/null -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/pklr/$version")
+            if [ "$status" = "404" ]; then
+              echo "pklr $version is not on crates.io, so there is nothing to tag"
+              exit 0
+            elif [ "$status" != "200" ]; then
+              echo "::error::crates.io answered $status for pklr $version"
+              exit 1
+            fi
+            curl -sSfL --retry 3 -A "$agent" -o "$RUNNER_TEMP/pklr.crate" \
+              "https://crates.io/api/v1/crates/pklr/$version/download"
+            sha=$(tar -xzOf "$RUNNER_TEMP/pklr.crate" "pklr-$version/.cargo_vcs_info.json" | jq -r .git.sha1)
+            if ! git merge-base --is-ancestor "$sha" HEAD; then
+              echo "::error::crates.io records $sha for pklr $version, which is not on this branch"
+              exit 1
+            fi
+            tag_object=$(gh api "repos/$REPO/git/tags" -f tag="$tag" -f object="$sha" -f type=commit \
+              -f message="chore: Release package pklr version $version" --jq .sha)
+            gh api "repos/$REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$tag_object" --silent
+            echo "Tagged $tag at $sha"
+          fi
+          # Checked even when the tag already exists, so a run that tagged but
+          # failed before drafting the release still gets one on the next push.
+          # Drafts are not found by tag name, so look through the list.
+          has_release=$(gh api "repos/$REPO/releases?per_page=100" \
+            --jq "any(.[]; .tag_name == \"$tag\")")
+          if [ "$has_release" = "true" ]; then
+            exit 0
+          fi
+          awk -v heading="## [$version]" \
+            'index($0, heading) == 1 { found = 1; next } found && /^## \[/ { exit } found { print }' \
+            CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          gh api "repos/$REPO/releases" -f tag_name="$tag" -f name="$tag" -F draft=true \
+            -F body=@"$RUNNER_TEMP/notes.md" --silent
+          echo "Drafted the release for $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   enhance-release:
     name: Enhance release notes
