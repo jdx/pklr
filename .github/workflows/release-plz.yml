@@ -61,10 +61,17 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pklr") | .version')
           tag="v$version"
           if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            if ! curl -sSfL -A "pklr-release (https://github.com/jdx/pklr)" -o "$RUNNER_TEMP/pklr.crate" \
-              "https://crates.io/api/v1/crates/pklr/$version/download"; then
+            # Only a 404 means the version is unpublished; any other failure
+            # (an outage, a rate limit) fails the step so it is not skipped.
+            status=$(curl -sSL --retry 3 -A "pklr-release (https://github.com/jdx/pklr)" \
+              -o "$RUNNER_TEMP/pklr.crate" -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/pklr/$version/download")
+            if [ "$status" = "404" ]; then
               echo "pklr $version is not on crates.io, so there is nothing to tag"
               exit 0
+            elif [ "$status" != "200" ]; then
+              echo "::error::crates.io answered $status for pklr $version"
+              exit 1
             fi
             sha=$(tar -xzOf "$RUNNER_TEMP/pklr.crate" "pklr-$version/.cargo_vcs_info.json" | jq -r .git.sha1)
             if ! git merge-base --is-ancestor "$sha" HEAD; then
