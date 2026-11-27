@@ -3266,6 +3266,203 @@ x = new Config {
 }
 
 #[test]
+fn non_open_class_rejects_undeclared_property_in_typed_mapping_entry() {
+    // Issue #493: an entry of a typed `Mapping`, in either form, amends the
+    // value type's default and cannot add a property the class lacks.
+    for entry in [
+        r#"["a"] = new { aprove = true }"#,
+        r#"["a"] { aprove = true }"#,
+    ] {
+        let msg = eval_fails(&format!(
+            "class N {{ approve: Boolean = false }}\nm: Mapping<String, N> = new {{ {entry} }}\n"
+        ));
+        assert!(
+            msg.contains("cannot add property 'aprove' to non-open class"),
+            "{entry}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn non_open_class_rejects_undeclared_property_in_amended_instance() {
+    for src in [
+        // An amend expression of an instance.
+        "class N { approve: Boolean = false }\na: N = new {}\nb = (a) { aprove = true }\n",
+        // A nested property body of a class instance.
+        "class N { approve: Boolean = false }\nclass O { n: N = new {} }\no: O = new { n { aprove = true } }\n",
+        // An instance built by a typed mapping entry, amended again.
+        "class N { approve: Boolean = false }\nm: Mapping<String, N> = new { [\"a\"] {} }\nb = (m[\"a\"]) { aprove = true }\n",
+    ] {
+        let msg = eval_fails(src);
+        assert!(
+            msg.contains("cannot add property 'aprove' to non-open class"),
+            "{src}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn typed_mapping_entries_accept_declared_and_open_members() {
+    let json = eval(
+        r#"
+open class O { approve: Boolean = false }
+open class P { base: Int = 1 }
+class C extends P { approve: Boolean = false }
+open class Q { a: Int = 1 }
+class R extends Q { extra: Int = 2 }
+class H { hidden h: Int = 1; n: Int = h }
+open1: Mapping<String, O> = new { ["a"] = new { aprove = true }; ["b"] { x = 1 } }
+dynamic: Mapping<String, Dynamic> = new { ["a"] = new { aprove = true } }
+untyped = new Mapping { ["a"] = new { aprove = true } }
+inherited: Mapping<String, C> = new { ["a"] = new { base = 2; approve = true }; ["b"] { base = 3 } }
+subclass: Mapping<String, Q> = new { ["a"] = new R { extra = 5 } }
+locals: Mapping<String, H> = new { ["a"] { h = 5; local l = 2; n = h + l } }
+listing: Listing<C> = new { new { base = 9 } }
+amended = (inherited["a"]) { base = 4 }
+"#,
+    );
+    assert_eq!(
+        json["open1"],
+        serde_json::json!({"a": {"approve": false, "aprove": true}, "b": {"approve": false, "x": 1}})
+    );
+    assert_eq!(json["dynamic"], serde_json::json!({"a": {"aprove": true}}));
+    assert_eq!(json["untyped"], serde_json::json!({"a": {"aprove": true}}));
+    assert_eq!(
+        json["inherited"],
+        serde_json::json!({"a": {"approve": true, "base": 2}, "b": {"approve": false, "base": 3}})
+    );
+    assert_eq!(
+        json["subclass"],
+        serde_json::json!({"a": {"a": 1, "extra": 5}})
+    );
+    assert_eq!(json["locals"], serde_json::json!({"a": {"n": 7}}));
+    assert_eq!(
+        json["listing"],
+        serde_json::json!([{"approve": false, "base": 9}])
+    );
+    assert_eq!(
+        json["amended"],
+        serde_json::json!({"approve": true, "base": 4})
+    );
+}
+
+#[test]
+fn amending_module_rejects_undeclared_property_of_typed_member() {
+    // Issue #493: a typed property of the amended module, with or without a
+    // default and through an amend chain, keeps its class's members.
+    let temp = TestTempDir::new("pklr_test_amending_module_undeclared_property");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class N { approve: Boolean = false; other: Int = 1 }
+open class O { approve: Boolean = false }
+n: N
+d: N = new {}
+o: O
+m: Mapping<String, N>
+md: Mapping<String, Dynamic>
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("mid.pkl"),
+        r#"amends "Config.pkl"
+n { approve = true }
+o { extra = 1 }
+m { ["a"] { other = 2 } }
+md { ["a"] { anything = 1 } }
+"#,
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&dir.join("mid.pkl")).unwrap();
+    assert_eq!(json["n"], serde_json::json!({"approve": true, "other": 1}));
+    assert_eq!(json["o"], serde_json::json!({"approve": false, "extra": 1}));
+    assert_eq!(
+        json["m"],
+        serde_json::json!({"a": {"approve": false, "other": 2}})
+    );
+    assert_eq!(json["md"], serde_json::json!({"a": {"anything": 1}}));
+    for (base, body) in [
+        ("Config.pkl", "n { aprove = true }"),
+        ("Config.pkl", "n = new { aprove = true }"),
+        ("Config.pkl", "d { aprove = true }"),
+        ("Config.pkl", r#"m { ["a"] = new { aprove = true } }"#),
+        ("Config.pkl", r#"m { ["a"] { aprove = true } }"#),
+        ("mid.pkl", "n { aprove = true }"),
+        ("mid.pkl", r#"m { ["a"] { aprove = true } }"#),
+    ] {
+        std::fs::write(dir.join("main.pkl"), format!("amends \"{base}\"\n{body}\n")).unwrap();
+        let err = pklr::eval_to_json(&dir.join("main.pkl"))
+            .expect_err(&format!("{base}: {body}"))
+            .to_string();
+        assert!(
+            err.contains("cannot add property 'aprove' to non-open class"),
+            "{base}: {body}: {err}"
+        );
+    }
+}
+
+#[test]
+fn non_open_class_rejects_undeclared_property_from_when_generator() {
+    for src in [
+        // An amend expression of an instance.
+        "class N { approve: Boolean = false }\nb = (new N {}) { when (true) { aprove = true } }\n",
+        // An entry of a typed mapping.
+        "class N { approve: Boolean = false }\nm: Mapping<String, N> = new { [\"a\"] { when (true) { aprove = true } } }\n",
+        // `new N { ... }`.
+        "class N { approve: Boolean = false }\nb = new N { when (true) { aprove = true } }\n",
+        // The `else` branch.
+        "class N { approve: Boolean = false }\nb = new N { when (false) { approve = true } else { aprove = true } }\n",
+        // A `when` nested in a `when`.
+        "class N { approve: Boolean = false }\nb = new N { when (true) { when (true) { aprove = true } } }\n",
+        // A `when` of an instance that takes its other branch once amended.
+        "class N { approve: Boolean = false }\na = new N { when (approve) { aprove = true } }\nb = (a) { approve = true }\n",
+    ] {
+        let msg = eval_fails(src);
+        assert!(
+            msg.contains("cannot add property 'aprove' to non-open class N"),
+            "{src}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn when_generator_adds_declared_local_and_open_members() {
+    let json = eval(
+        r#"
+open class P { base: Int = 1 }
+class N extends P { approve: Boolean = false; name: String = "x" }
+open class O { approve: Boolean = false }
+a = new N { when (true) { approve = true; local l = "y"; name = l; base = 2 } }
+b = (a) { when (false) { aprove = true } else { name = "z" } }
+c = new O { when (true) { extra = 1 } }
+d = new Dynamic { when (true) { extra = 1 } }
+m: Mapping<String, N> = new { ["a"] { when (true) { when (true) { approve = true } } } }
+e = new N { when (false) { aprove = true } }
+"#,
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({"approve": true, "base": 2, "name": "y"})
+    );
+    assert_eq!(
+        json["b"],
+        serde_json::json!({"approve": true, "base": 2, "name": "z"})
+    );
+    assert_eq!(json["c"], serde_json::json!({"approve": false, "extra": 1}));
+    assert_eq!(json["d"], serde_json::json!({"extra": 1}));
+    assert_eq!(
+        json["m"],
+        serde_json::json!({"a": {"approve": true, "base": 1, "name": "x"}})
+    );
+    assert_eq!(
+        json["e"],
+        serde_json::json!({"approve": false, "base": 1, "name": "x"})
+    );
+}
+
+#[test]
 fn non_open_class_allows_overrides() {
     let json = eval(
         r#"

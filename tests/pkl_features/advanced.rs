@@ -612,7 +612,7 @@ amended = (steps) { ["o"] = other }
 fn typed_mapping_entry_still_merges_template_into_untyped_values() {
     let json = eval(
         r#"
-class Step { name: String = "x" }
+class Step { name: String = "x"; extra: Int = 0 }
 steps: Mapping<String, Step> = new Mapping<String, Step> {}
 amended = (steps) {
     ["dynamic"] = new Dynamic { extra = 1 }
