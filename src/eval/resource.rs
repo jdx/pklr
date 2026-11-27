@@ -23,6 +23,11 @@ impl Evaluator {
 
     fn read_resource(&mut self, uri: &str, module: &Path) -> Result<Option<Value>> {
         let target = self.resolve_resource(uri, module)?;
+        // Absence never comes from the cache: a reader may serve a URI whose
+        // cache key matches the fixed key an unreadable target would use.
+        if matches!(target, Target::Unreadable) {
+            return Ok(None);
+        }
         let cache_key = target.cache_key();
         if let Some(value) = self.resource_cache.get(&cache_key) {
             return Ok(Some(value.clone()));

@@ -460,3 +460,25 @@ fn triple_dot_reads_ask_the_resource_reader_once_per_candidate() {
     assert_eq!(json, serde_json::json!({"text": "near"}));
     assert_eq!(*asked.lock().unwrap(), ["test:/a/data.txt"]);
 }
+
+#[test]
+fn a_missing_resource_is_absent_whatever_a_reader_has_cached() {
+    let dir = TestTempDir::new("pklr_reader_unreadable_key");
+    let main = dir.write(
+        "main.pkl",
+        "served = read(\"unreadable:\").text\nmissing = read?(\"missing:/x\") == null\n",
+    );
+    let json = EvaluatorBuilder::new()
+        .resource_reader("unreadable", resources(&[("unreadable:", "served")]))
+        .allowed_resources([
+            "file:".to_string(),
+            "unreadable:".to_string(),
+            "missing:".to_string(),
+        ])
+        .eval_to_json(&main)
+        .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"served": "served", "missing": true})
+    );
+}
