@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.0](https://github.com/jdx/pklr/compare/v6.0.4...v6.1.0) - 2026-11-27
+
+### Added
+
+- *(eval)* read modules and resources through custom and external readers ([#495](https://github.com/jdx/pklr/pull/495))
+
+### Fixed
+
+- *(eval)* keep a hidden member assigned in a when generator hidden ([#499](https://github.com/jdx/pklr/pull/499))
+- *(eval)* never answer a missing resource from the cache ([#498](https://github.com/jdx/pklr/pull/498))
+- *(eval)* apply a Mapping entry's listing amendment once through amend chains ([#497](https://github.com/jdx/pklr/pull/497))
+- *(eval)* refuse undeclared properties in typed Mapping entries and amended properties ([#496](https://github.com/jdx/pklr/pull/496))
+- *(build)* build on 32-bit targets without 64-bit atomics (powerpc, mips) ([#486](https://github.com/jdx/pklr/pull/486))
+
+### Other
+
+- *(deps)* lock file maintenance ([#491](https://github.com/jdx/pklr/pull/491))
+- *(deps)* lock file maintenance ([#489](https://github.com/jdx/pklr/pull/489))
+
 ## [6.0.4](https://github.com/jdx/pklr/compare/v6.0.3...v6.0.4) - 2026-11-20
 
 ### Fixed
