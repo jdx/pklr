@@ -2263,6 +2263,273 @@ fn body_only_declarations_accumulate_across_the_amends_chain() {
     );
 }
 
+/// Evaluates `main.pkl` among `files`, to JSON.
+fn eval_module_chain(name: &str, files: &[(&str, &str)]) -> serde_json::Value {
+    let dir = TestTempDir::new(name);
+    for (file, src) in files {
+        std::fs::write(dir.path().join(file), src).unwrap();
+    }
+    pklr::eval_to_json(&dir.path().join("main.pkl")).unwrap()
+}
+
+const NESTED_LISTING_BASE: &str = "class N { also: Listing<String> }\nm: Mapping<String, N>\n";
+const NESTED_LISTING_MID: &str = "amends \"base.pkl\"\nm { [\"a\"] { also { \"x\"; \"y\" } } }\n";
+
+// A listing a module adds to inside a member it amends is amended once,
+// however many modules amend that module in turn (#494).
+#[test]
+fn amending_a_module_does_not_repeat_a_nested_listing_amendment() {
+    let files = [
+        ("base.pkl", NESTED_LISTING_BASE),
+        ("mid.pkl", NESTED_LISTING_MID),
+    ];
+    let json = eval_module_chain(
+        "pklr_nested_listing_once",
+        &[files[0], files[1], ("main.pkl", "amends \"mid.pkl\"\n")],
+    );
+    assert_eq!(json, serde_json::json!({"m": {"a": {"also": ["x", "y"]}}}));
+    let json = eval_module_chain(
+        "pklr_nested_listing_once_deeper",
+        &[
+            files[0],
+            files[1],
+            ("mid2.pkl", "amends \"mid.pkl\"\n"),
+            ("main.pkl", "amends \"mid2.pkl\"\n"),
+        ],
+    );
+    assert_eq!(json, serde_json::json!({"m": {"a": {"also": ["x", "y"]}}}));
+    let json = eval_module_chain(
+        "pklr_nested_listing_once_added",
+        &[
+            files[0],
+            files[1],
+            (
+                "main.pkl",
+                "amends \"mid.pkl\"\nm { [\"a\"] { also { \"z\" } } }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"m": {"a": {"also": ["x", "y", "z"]}}})
+    );
+}
+
+#[test]
+fn amending_a_module_does_not_repeat_a_listing_mapping_entry_or_property() {
+    let json = eval_module_chain(
+        "pklr_listing_entry_once",
+        &[
+            ("base.pkl", "m: Mapping<String, Listing<String>>\n"),
+            (
+                "mid.pkl",
+                "amends \"base.pkl\"\nm { [\"a\"] { \"x\"; \"y\" } }\n",
+            ),
+            ("main.pkl", "amends \"mid.pkl\"\n"),
+        ],
+    );
+    assert_eq!(json, serde_json::json!({"m": {"a": ["x", "y"]}}));
+    let json = eval_module_chain(
+        "pklr_listing_property_once",
+        &[
+            (
+                "base.pkl",
+                "class N { also: Listing<String> }\nn: N\nd { also { \"x\" } }\n",
+            ),
+            (
+                "mid.pkl",
+                "amends \"base.pkl\"\nn { also { \"x\"; \"y\" } }\n",
+            ),
+            ("main.pkl", "amends \"mid.pkl\"\n"),
+        ],
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"n": {"also": ["x", "y"]}, "d": {"also": ["x"]}})
+    );
+}
+
+// An amendment that reads a member a later module overrides is made again
+// from the declared type, keeping its class, rather than on top of the value
+// it made before; one that reads an inherited late-bound member amends the
+// base's value.
+#[test]
+fn a_nested_listing_amendment_reading_an_overridden_member_is_made_once() {
+    let base = "class N { also: Listing<String>; d: String = \"d\" }\nv: String = \"1\"\n\
+                m: Mapping<String, N>\nn: N\nl: Listing<String>\ncls = n.getClass().simpleName\n";
+    let mid =
+        "amends \"base.pkl\"\nm { [\"a\"] { also { v; \"y\" } } }\nn { also { v } }\nl { v }\n";
+    let json = eval_module_chain(
+        "pklr_nested_listing_reads_mid",
+        &[("base.pkl", base), ("main.pkl", mid)],
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "v": "1", "m": {"a": {"also": ["1", "y"], "d": "d"}},
+            "n": {"also": ["1"], "d": "d"}, "l": ["1"], "cls": "N"
+        })
+    );
+    let json = eval_module_chain(
+        "pklr_nested_listing_reads_top",
+        &[
+            ("base.pkl", base),
+            ("mid.pkl", mid),
+            ("main.pkl", "amends \"mid.pkl\"\nv = \"2\"\n"),
+        ],
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "v": "2", "m": {"a": {"also": ["2", "y"], "d": "d"}},
+            "n": {"also": ["2"], "d": "d"}, "l": ["2"], "cls": "N"
+        })
+    );
+}
+
+// A spread adds its collection's elements once through an amends chain, as
+// an element does; a spread into a mapping adds its entries once.
+#[test]
+fn amending_a_module_does_not_repeat_a_spread() {
+    let base = "xs = List(\"1\")\nm: Mapping<String, Listing<String>>\n\
+                mm: Mapping<String, Mapping<String, String>>\nl: Listing<String>\n";
+    let mid = "amends \"base.pkl\"\nm { [\"a\"] { ...List(\"x\", \"y\") } }\n\
+               mm { [\"a\"] { ...Map(\"k\", \"v\") } }\nl { ...xs }\n";
+    let expected = |x: &str| {
+        serde_json::json!({
+            "xs": [x], "m": {"a": ["x", "y"]}, "mm": {"a": {"k": "v"}}, "l": [x]
+        })
+    };
+    let json = eval_module_chain(
+        "pklr_spread_once",
+        &[
+            ("base.pkl", base),
+            ("mid.pkl", mid),
+            ("main.pkl", "amends \"mid.pkl\"\n"),
+        ],
+    );
+    assert_eq!(json, expected("1"));
+    let json = eval_module_chain(
+        "pklr_spread_once_reads_top",
+        &[
+            ("base.pkl", base),
+            ("mid.pkl", mid),
+            ("mid2.pkl", "amends \"mid.pkl\"\n"),
+            ("main.pkl", "amends \"mid2.pkl\"\nxs = List(\"2\")\n"),
+        ],
+    );
+    assert_eq!(json, expected("2"));
+}
+
+// The layers of a member keep reading the `local`s of the module that wrote
+// them, also where a later module declares a local of the same name.
+#[test]
+fn listing_layers_keep_the_locals_of_their_own_module() {
+    let json = eval_module_chain(
+        "pklr_listing_layers_keep_locals",
+        &[
+            ("base.pkl", "v = \"1\"\nl: Listing<String>\nn: Dynamic\n"),
+            (
+                "mid.pkl",
+                "amends \"base.pkl\"\nlocal x = \"lx\"\nlocal xs = List(\"s1\")\n\
+                 l { x; ...xs }\nn { items { x } }\n",
+            ),
+            (
+                "mid2.pkl",
+                "amends \"mid.pkl\"\nlocal x = \"other\"\nl { v; x }\nn { items { v } }\n",
+            ),
+            ("main.pkl", "amends \"mid2.pkl\"\nv = \"2\"\n"),
+        ],
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"v": "2", "l": ["lx", "s1", "2", "other"], "n": {"items": ["lx", "2"]}})
+    );
+}
+
+// A member typed with a union that names no default amends its default, null,
+// into a `Dynamic` when a later module overrides what its layers read, as it
+// does when nothing is overridden.
+#[test]
+fn listing_layers_of_a_member_typed_without_one_parent_are_kept() {
+    for (name, decl) in [
+        ("pklr_nullable_union_layers", "o: (Dynamic|Int)?\n"),
+        (
+            "pklr_nullable_union_alias_layers",
+            "typealias U = Dynamic|Int\no: U?\n",
+        ),
+    ] {
+        let base = format!("v = \"1\"\n{decl}");
+        let json = eval_module_chain(
+            name,
+            &[
+                ("base.pkl", &base),
+                ("mid.pkl", "amends \"base.pkl\"\no { items { \"x\" } }\n"),
+                ("mid2.pkl", "amends \"mid.pkl\"\no { items { v } }\n"),
+                ("main.pkl", "amends \"mid2.pkl\"\nv = \"2\"\n"),
+            ],
+        );
+        assert_eq!(
+            json,
+            serde_json::json!({"v": "2", "o": {"items": ["x", "2"]}}),
+            "{name}"
+        );
+    }
+}
+
+// Each module's amendment of a listing, directly or inside a member, keeps
+// the elements the modules before it added, also when a later module
+// overrides what one of them reads.
+#[test]
+fn listing_amendments_of_every_module_in_the_chain_are_kept() {
+    let base = "class N { also: Listing<String>; d: String = \"d\" }\nv = \"1\"\n\
+                m: Mapping<String, Listing<String>>\nl: Listing<String>\n\
+                nm: Mapping<String, N>\nn: N\nmc = m[\"a\"].getClass().simpleName\n\
+                nc = n.getClass().simpleName\n";
+    let layer = |amends: &str, elem: &str| {
+        format!(
+            "amends \"{amends}\"\nm {{ [\"a\"] {{ {elem} }} }}\nl {{ {elem} }}\n\
+             nm {{ [\"a\"] {{ also {{ {elem} }} }} }}\nn {{ also {{ {elem} }} }}\n"
+        )
+    };
+    let expected = |v: &str, elems: &[&str]| {
+        let mut elems: Vec<&str> = elems.to_vec();
+        elems.push(v);
+        serde_json::json!({
+            "v": v, "m": {"a": elems}, "l": elems,
+            "nm": {"a": {"also": elems, "d": "d"}}, "n": {"also": elems, "d": "d"},
+            "mc": "Listing", "nc": "N"
+        })
+    };
+    let (mid, mid2) = (layer("base.pkl", "\"x\""), layer("mid.pkl", "v"));
+    let json = eval_module_chain(
+        "pklr_listing_layers_kept",
+        &[("base.pkl", base), ("mid.pkl", &mid), ("main.pkl", &mid2)],
+    );
+    assert_eq!(json, expected("1", &["x"]));
+    let json = eval_module_chain(
+        "pklr_listing_layers_kept_reads_top",
+        &[
+            ("base.pkl", base),
+            ("mid.pkl", &mid),
+            ("mid2.pkl", &mid2),
+            ("main.pkl", "amends \"mid2.pkl\"\nv = \"2\"\n"),
+        ],
+    );
+    assert_eq!(json, expected("2", &["x"]));
+    let json = eval_module_chain(
+        "pklr_listing_three_layers_kept_reads_top",
+        &[
+            ("base.pkl", base),
+            ("mid.pkl", &mid),
+            ("midz.pkl", &layer("mid.pkl", "\"z\"")),
+            ("mid2.pkl", &layer("midz.pkl", "v")),
+            ("main.pkl", "amends \"mid2.pkl\"\nv = \"2\"\n"),
+        ],
+    );
+    assert_eq!(json, expected("2", &["x", "z"]));
+}
+
 // Classes of the same name in different modules, such as `json.Property` and
 // `yaml.Property`, are different classes: a converter keyed by one does not
 // apply to the other's instances, while one keyed by a parent still reaches
