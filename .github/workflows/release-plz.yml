@@ -60,28 +60,36 @@ jobs:
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pklr") | .version')
           tag="v$version"
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            if ! curl -sSfL -A "pklr-release (https://github.com/jdx/pklr)" -o "$RUNNER_TEMP/pklr.crate" \
+              "https://crates.io/api/v1/crates/pklr/$version/download"; then
+              echo "pklr $version is not on crates.io, so there is nothing to tag"
+              exit 0
+            fi
+            sha=$(tar -xzOf "$RUNNER_TEMP/pklr.crate" "pklr-$version/.cargo_vcs_info.json" | jq -r .git.sha1)
+            if ! git merge-base --is-ancestor "$sha" HEAD; then
+              echo "::error::crates.io records $sha for pklr $version, which is not on this branch"
+              exit 1
+            fi
+            tag_object=$(gh api "repos/$REPO/git/tags" -f tag="$tag" -f object="$sha" -f type=commit \
+              -f message="chore: Release package pklr version $version" --jq .sha)
+            gh api "repos/$REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$tag_object" --silent
+            echo "Tagged $tag at $sha"
+          fi
+          # Checked even when the tag already exists, so a run that tagged but
+          # failed before drafting the release still gets one on the next push.
+          # Drafts are not found by tag name, so look through the list.
+          has_release=$(gh api "repos/$REPO/releases?per_page=100" \
+            --jq "any(.[]; .tag_name == \"$tag\")")
+          if [ "$has_release" = "true" ]; then
             exit 0
           fi
-          if ! curl -sSfL -A "pklr-release (https://github.com/jdx/pklr)" -o "$RUNNER_TEMP/pklr.crate" \
-            "https://crates.io/api/v1/crates/pklr/$version/download"; then
-            echo "pklr $version is not on crates.io, so there is nothing to tag"
-            exit 0
-          fi
-          sha=$(tar -xzOf "$RUNNER_TEMP/pklr.crate" "pklr-$version/.cargo_vcs_info.json" | jq -r .git.sha1)
-          if ! git merge-base --is-ancestor "$sha" HEAD; then
-            echo "::error::crates.io records $sha for pklr $version, which is not on this branch"
-            exit 1
-          fi
-          tag_object=$(gh api "repos/$REPO/git/tags" -f tag="$tag" -f object="$sha" -f type=commit \
-            -f message="chore: Release package pklr version $version" --jq .sha)
-          gh api "repos/$REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$tag_object" --silent
           awk -v heading="## [$version]" \
             'index($0, heading) == 1 { found = 1; next } found && /^## \[/ { exit } found { print }' \
             CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           gh api "repos/$REPO/releases" -f tag_name="$tag" -f name="$tag" -F draft=true \
             -F body=@"$RUNNER_TEMP/notes.md" --silent
-          echo "Tagged $tag at $sha"
+          echo "Drafted the release for $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   enhance-release:
