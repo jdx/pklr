@@ -61,11 +61,13 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pklr") | .version')
           tag="v$version"
           if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            # Only a 404 means the version is unpublished; any other failure
-            # (an outage, a rate limit) fails the step so it is not skipped.
-            status=$(curl -sSL --retry 3 -A "pklr-release (https://github.com/jdx/pklr)" \
-              -o "$RUNNER_TEMP/pklr.crate" -w '%{http_code}' \
-              "https://crates.io/api/v1/crates/pklr/$version/download")
+            # Ask the API whether the version exists: the download URL redirects
+            # to the CDN without checking, and the CDN's answer for a missing
+            # file is not guaranteed. Only the API's 404 means unpublished; any
+            # other failure (an outage, a rate limit) fails the step.
+            agent="pklr-release (https://github.com/jdx/pklr)"
+            status=$(curl -sS --retry 3 -A "$agent" -o /dev/null -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/pklr/$version")
             if [ "$status" = "404" ]; then
               echo "pklr $version is not on crates.io, so there is nothing to tag"
               exit 0
@@ -73,6 +75,8 @@ jobs:
               echo "::error::crates.io answered $status for pklr $version"
               exit 1
             fi
+            curl -sSfL --retry 3 -A "$agent" -o "$RUNNER_TEMP/pklr.crate" \
+              "https://crates.io/api/v1/crates/pklr/$version/download"
             sha=$(tar -xzOf "$RUNNER_TEMP/pklr.crate" "pklr-$version/.cargo_vcs_info.json" | jq -r .git.sha1)
             if ! git merge-base --is-ancestor "$sha" HEAD; then
               echo "::error::crates.io records $sha for pklr $version, which is not on this branch"
