@@ -1,4 +1,8 @@
 context = "pklr is a pure Rust parser and evaluator for Apple's Pkl configuration language. It requires no external binary or CLI."
 
+system_extra = """
+Credit only people other than @jdx. @jdx maintains pklr and writes most changes, so a bullet for a change he wrote ends with its PR link and no username: never add "(@jdx)", "by @jdx", or thanks to @jdx. When someone else wrote a change, or is named in its description as a co-author or as the person who reported the problem, credit them by username.
+"""
+
 [defaults]
 emoji = false
