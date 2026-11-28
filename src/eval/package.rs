@@ -417,9 +417,7 @@ impl Evaluator {
             None => self.fetch_package_bytes(zip_url, "zip")?,
         };
         // Extract the verified bytes afresh, replacing any earlier unchecked copy.
-        let prefix = format!("pklr-pkg-{}", self.package_dirs.len());
-        let dir = self.temp_dir_io(&prefix)?;
-        self.extract_zip_io(bytes, &dir)?;
+        let dir = self.extract_package_zip_io(bytes)?;
         self.package_dirs.insert(zip_url.to_string(), dir.clone());
         match expected {
             Some(expected) => {
@@ -618,6 +616,7 @@ result = c.answer"#
     fn checksum_is_enforced_after_an_unchecked_import_extracted_the_archive() {
         let (mut evaluator, checksum, metadata) = checksummed_package("reuse", None);
         let path = std::path::Path::new("main.pkl");
+        let zip_url = "https://example.com/p@1.0.zip";
         evaluator
             .eval_source(
                 r#"import "package://example.com/p@1.0#/Config.pkl" as c
@@ -625,6 +624,7 @@ result = c.answer"#,
                 path,
             )
             .unwrap();
+        let unchecked_dir = evaluator.package_dir_for_zip(zip_url).unwrap().clone();
         let wrong = "0".repeat(64);
         let error = evaluator
             .eval_source(
@@ -652,6 +652,12 @@ result = c.answer"#
             )
             .unwrap();
         assert_eq!(value.to_json()["result"], 42);
+        let verified_dir = evaluator.package_dir_for_zip(zip_url).unwrap().clone();
+        assert_ne!(unchecked_dir, verified_dir);
+        assert!(verified_dir.join("Config.pkl").is_file());
+        drop(evaluator);
+        assert!(!unchecked_dir.exists());
+        assert!(!verified_dir.exists());
     }
 
     #[test]

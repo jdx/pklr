@@ -479,13 +479,9 @@ impl Evaluator {
                     return;
                 }
                 let _ = self.write_package_cache(&url, "zip", bytes);
-                let prefix = format!("pklr-pkg-{}", self.package_dirs.len());
-                let Ok(dir) = self.temp_dir_io(&prefix) else {
+                let Ok(dir) = self.extract_package_zip_io(bytes.to_vec()) else {
                     return;
                 };
-                if self.extract_zip_io(bytes.to_vec(), &dir).is_err() {
-                    return;
-                }
                 self.package_dirs.insert(url, dir.clone());
                 self.push_package_entries(&dir, &entries, &roots, sources);
             }
