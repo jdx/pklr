@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use pklr::capabilities::EvalCapabilities;
+use pklr::capabilities::{EvalCapabilities, NativeCapabilities};
 use pklr::eval::Evaluator;
 use pklr::lexer::{TokenKind, lex};
 use pklr::parser::{BinOp, Entry, Expr, TypeExpr, collect_imports, parse};
@@ -147,6 +147,7 @@ impl EvalCapabilities for MemoryCapabilities {
 struct SandboxPackageCapabilities {
     archive: Vec<u8>,
     extraction_dir: PathBuf,
+    fail_extraction: bool,
 }
 
 impl EvalCapabilities for SandboxPackageCapabilities {
@@ -184,6 +185,18 @@ impl EvalCapabilities for SandboxPackageCapabilities {
         std::fs::create_dir_all(&extraction_dir)
             .map_err(|error| pklr::Error::Io(extraction_dir.clone(), error))?;
         Ok(extraction_dir)
+    }
+
+    fn extract_zip(&mut self, bytes: Vec<u8>, destination: &Path) -> pklr::Result<()> {
+        if self.fail_extraction {
+            std::fs::write(destination.join("partial.pkl"), b"answer = ").unwrap();
+            return Err(pklr::Error::Eval("simulated extraction failure".into()));
+        }
+        NativeCapabilities::new().extract_zip(bytes, destination)
+    }
+
+    fn remove_temp_dir(&mut self, path: &Path) -> pklr::Result<()> {
+        std::fs::remove_dir_all(path).map_err(|error| pklr::Error::Io(path.to_path_buf(), error))
     }
 
     fn glob(&mut self, _base: &Path, _pattern: &str) -> pklr::Result<Vec<PathBuf>> {
@@ -242,16 +255,9 @@ fn custom_capabilities_handle_http_import() {
     );
 }
 
-#[test]
-fn package_extraction_uses_custom_temp_dir() {
+fn sandbox_package_archive() -> Vec<u8> {
     use std::io::Write;
 
-    let root = std::env::temp_dir().join(format!(
-        "pklr_test_custom_package_temp_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let extraction_dir = root.join("sandbox");
     let mut archive = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
@@ -264,9 +270,19 @@ fn package_extraction_uses_custom_temp_dir() {
         zip.write_all(b"answer = 42\n").unwrap();
         zip.finish().unwrap();
     }
+    archive
+}
+
+#[test]
+fn package_extraction_uses_custom_temp_dir() {
+    let root = NativeCapabilities::new()
+        .temp_dir("pklr-test-custom-package")
+        .unwrap();
+    let extraction_dir = root.join("sandbox");
     let mut evaluator = Evaluator::with_capabilities(SandboxPackageCapabilities {
-        archive,
+        archive: sandbox_package_archive(),
         extraction_dir: extraction_dir.clone(),
+        fail_extraction: false,
     });
 
     let json = evaluator
@@ -279,6 +295,34 @@ fn package_extraction_uses_custom_temp_dir() {
 
     assert_eq!(json["answer"], 42);
     assert!(extraction_dir.join("Config.pkl").is_file());
+    drop(evaluator);
+    assert!(!extraction_dir.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_package_extraction_is_cleaned_up_on_drop() {
+    let root = NativeCapabilities::new()
+        .temp_dir("pklr-test-failed-package")
+        .unwrap();
+    let extraction_dir = root.join("sandbox");
+    let mut evaluator = Evaluator::with_capabilities(SandboxPackageCapabilities {
+        archive: sandbox_package_archive(),
+        extraction_dir: extraction_dir.clone(),
+        fail_extraction: true,
+    });
+
+    let error = evaluator
+        .eval_source(
+            "amends \"package://example.com/package@1.0.0#/Config.pkl\"\n",
+            &root.join("main.pkl"),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("simulated extraction failure"));
+    assert!(extraction_dir.join("partial.pkl").is_file());
+    drop(evaluator);
+    assert!(!extraction_dir.exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

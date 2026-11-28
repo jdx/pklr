@@ -141,6 +141,13 @@ pub trait EvalCapabilities: Send + Sync {
 
     fn temp_dir(&mut self, prefix: &str) -> Result<PathBuf>;
 
+    /// Clean up a directory returned by [`Self::temp_dir`] when the evaluator
+    /// drops. The default leaves cleanup to the host.
+    #[cfg(feature = "package-zip")]
+    fn remove_temp_dir(&mut self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+
     /// The file system view that globs run over, for [`Self::glob`] (and,
     /// unless [`Self::resource_glob_access`] says otherwise, `read*` globs).
     ///
@@ -634,6 +641,11 @@ impl EvalCapabilities for NativeCapabilities {
 
     fn temp_dir(&mut self, prefix: &str) -> Result<PathBuf> {
         unique_temp_dir(prefix)
+    }
+
+    #[cfg(feature = "package-zip")]
+    fn remove_temp_dir(&mut self, path: &Path) -> Result<()> {
+        std::fs::remove_dir_all(path).map_err(|error| crate::Error::Io(path.to_path_buf(), error))
     }
 
     fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {

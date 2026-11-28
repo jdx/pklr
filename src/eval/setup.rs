@@ -57,8 +57,12 @@ impl Evaluator {
     }
 
     #[cfg(feature = "package-zip")]
-    pub(super) fn extract_zip_io(&mut self, bytes: Vec<u8>, destination: &Path) -> Result<()> {
-        self.capabilities.extract_zip(bytes, destination)
+    pub(super) fn extract_package_zip_io(&mut self, bytes: Vec<u8>) -> Result<PathBuf> {
+        let prefix = format!("pklr-pkg-{}", self.package_dirs.len());
+        let dir = self.capabilities.temp_dir(&prefix)?;
+        self.package_temp_dirs.push(dir.clone());
+        self.capabilities.extract_zip(bytes, &dir)?;
+        Ok(dir)
     }
 
     pub(super) fn read_env_io(&mut self, name: &str) -> Result<Option<String>> {
@@ -73,11 +77,6 @@ impl Evaluator {
     pub(super) fn fetch_bytes_io(&mut self, url: &str) -> Result<Vec<u8>> {
         self.check_cancelled()?;
         self.capabilities.fetch_bytes(url)
-    }
-
-    #[cfg(feature = "package-zip")]
-    pub(super) fn temp_dir_io(&mut self, prefix: &str) -> Result<PathBuf> {
-        self.capabilities.temp_dir(prefix)
     }
 
     pub(super) fn resource_path_exists_io(&mut self, path: &Path) -> Result<bool> {
@@ -175,6 +174,8 @@ impl Evaluator {
             cancel: None,
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::default(),
+            #[cfg(feature = "package-zip")]
+            package_temp_dirs: Vec::new(),
             package_checksums: HashMap::default(),
             #[cfg(feature = "package-zip")]
             verified_packages: HashMap::default(),
@@ -533,6 +534,10 @@ impl Evaluator {
 
 impl Drop for Evaluator {
     fn drop(&mut self) {
+        #[cfg(feature = "package-zip")]
+        for dir in self.package_temp_dirs.iter().rev() {
+            let _ = self.capabilities.remove_temp_dir(dir);
+        }
         self.release_deep_state();
         // Whatever the evaluation left that was not deep enough to need a
         // large stack to free.

@@ -239,6 +239,9 @@ pub struct Evaluator {
     /// Extracted package zip directories (zip URL → temp dir path)
     #[cfg(feature = "package-zip")]
     package_dirs: HashMap<String, PathBuf>,
+    /// All extraction directories, including replaced and partial extractions.
+    #[cfg(feature = "package-zip")]
+    package_temp_dirs: Vec<PathBuf>,
     /// Expected metadata SHA-256 per package zip URL, from `::sha256:` URIs.
     package_checksums: HashMap<String, String>,
     /// Per zip URL, the extracted directory and checksum it was verified against.
