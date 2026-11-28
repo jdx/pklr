@@ -121,10 +121,15 @@ jobs:
         with:
           cache: false
       - run: |
+          # communique writes the review report before it updates the release,
+          # so add the report to the summary even when that update fails.
+          append_coverage() {
+            if [[ -f "$RUNNER_TEMP/communique-coverage.md" ]]; then
+              cat "$RUNNER_TEMP/communique-coverage.md" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          trap append_coverage EXIT
           communique generate "$RELEASE_TAG" --github-release --review-report "$RUNNER_TEMP/communique-coverage.md"
-          if [[ -f "$RUNNER_TEMP/communique-coverage.md" ]]; then
-            cat "$RUNNER_TEMP/communique-coverage.md" >> "$GITHUB_STEP_SUMMARY"
-          fi
         env:
           RELEASE_TAG: ${{ needs.release-plz-release.outputs.tag }}
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
